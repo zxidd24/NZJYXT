@@ -51,7 +51,10 @@ public class FinanceService {
     public RefundView applyRefund(Long userId, Long orderId, BigDecimal amount, String reason) {
         OrderMain order = ownedOrder(userId, orderId);
         if (!Objects.equals(order.getPayStatus(), StatusEnums.PayStatus.PAID.value)
-                || !List.of(1, 2, 3).contains(order.getOrderStatus())) {
+                || !List.of(StatusEnums.OrderStatus.PENDING_AUDIT.value,
+                StatusEnums.OrderStatus.PENDING_SHIPMENT.value,
+                StatusEnums.OrderStatus.PENDING_RECEIPT.value,
+                StatusEnums.OrderStatus.COMPLETED.value).contains(order.getOrderStatus())) {
             throw business("当前订单不可申请退款");
         }
         amount = validAmount(amount, "退款金额");

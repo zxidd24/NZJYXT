@@ -8,6 +8,8 @@ import com.nzxhjy.agri.service.entity.PortalUserInfo;
 import com.nzxhjy.agri.service.entity.LoanRecord;
 import com.nzxhjy.agri.service.entity.RefundApply;
 import com.nzxhjy.agri.service.entity.WalletAccount;
+import com.nzxhjy.agri.service.entity.AuditFlow;
+import com.nzxhjy.agri.service.entity.AuditNode;
 import com.nzxhjy.agri.service.mapper.*;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -100,6 +102,31 @@ class FinanceServiceTest {
 
         assertEquals(ErrorCodeEnum.BUSINESS_ERROR.getCode(), exception.getCode());
         verify(refundMapper, never()).insert(any(RefundApply.class));
+    }
+
+    @Test
+    void completedOrderCanApplyRefund() {
+        OrderMain order = new OrderMain();
+        order.setId(9L);
+        order.setUserId(7L);
+        order.setPayStatus(1);
+        order.setOrderStatus(4);
+        order.setPayAmount(new BigDecimal("20.00"));
+        when(orderMapper.selectById(9L)).thenReturn(order);
+        when(refundMapper.selectCount(any())).thenReturn(0L);
+        when(detailMapper.selectList(any())).thenReturn(java.util.List.of());
+        AuditFlow flow = new AuditFlow();
+        flow.setId(5L);
+        AuditNode node = new AuditNode();
+        node.setId(6L);
+        when(auditFlowMapper.selectOne(any())).thenReturn(flow);
+        when(auditNodeMapper.selectOne(any())).thenReturn(node);
+
+        FinanceService.RefundView view = service.applyRefund(7L, 9L,
+                new BigDecimal("3.00"), "已完成订单退款");
+
+        assertEquals(new BigDecimal("3.00"), view.getRefundAmount());
+        verify(refundMapper).insert(any(RefundApply.class));
     }
 
     private WalletAccount wallet(Long userId, String balance) {
