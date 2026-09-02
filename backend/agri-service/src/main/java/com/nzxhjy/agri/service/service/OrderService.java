@@ -189,21 +189,38 @@ public class OrderService {
         }
     }
 
-    private void payFromWallet(Long userId, OrderMain order) { WalletAccount account = walletMapper.selectOne(Wrappers.<WalletAccount>lambdaQuery().eq(WalletAccount::getUserId, userId)); if (account == null || account.getBalance() == null || account.getBalance().compareTo(order.getPayAmount()) < 0) throw business("钱包余额不足"); int updated = walletMapper.update(null, Wrappers.<WalletAccount>lambdaUpdate().eq(WalletAccount::getUserId, userId).ge(WalletAccount::getBalance, order.getPayAmount()).setSql("balance = balance - " + order.getPayAmount())); if (updated == 0) throw business("钱包余额不足"); BigDecimal after = account.getBalance().subtract(order.getPayAmount()); WalletTransaction tx = new WalletTransaction(); tx.setUserId(userId); tx.setOrderId(order.getId()); tx.setTransNo(generateNo("T")); tx.setAmount(order.getPayAmount()); tx.setDirection(2); tx.setTransType(3); tx.setTransStatus(1); tx.setBalanceAfter(after); tx.setRemark("订单支付"); transactionMapper.insert(tx); }
+    private void payFromWallet(Long userId, OrderMain order) {
+        WalletAccount account = walletMapper.selectByUserIdForUpdate(userId);
+        if (account == null || account.getBalance() == null || account.getBalance().compareTo(order.getPayAmount()) < 0) {
+            throw business("钱包余额不足");
+        }
+        int updated = walletMapper.update(null, Wrappers.<WalletAccount>lambdaUpdate()
+                .eq(WalletAccount::getId, account.getId())
+                .ge(WalletAccount::getBalance, order.getPayAmount())
+                .setSql("balance = balance - " + order.getPayAmount().toPlainString()));
+        if (updated == 0) throw business("钱包余额不足");
+        BigDecimal after = account.getBalance().subtract(order.getPayAmount());
+        WalletTransaction tx = new WalletTransaction();
+        tx.setUserId(userId); tx.setOrderId(order.getId()); tx.setTransNo(generateNo("T"));
+        tx.setAmount(order.getPayAmount()); tx.setDirection(2); tx.setTransType(3);
+        tx.setTransStatus(1); tx.setBalanceAfter(after); tx.setRemark("订单支付");
+        transactionMapper.insert(tx);
+    }
     private void createOrderAudit(OrderMain order) { AuditFlow flow = auditFlowMapper.selectOne(Wrappers.<AuditFlow>lambdaQuery().eq(AuditFlow::getBizType, 4).eq(AuditFlow::getEnabled, 1)); AuditNode node = flow == null ? null : auditNodeMapper.selectOne(Wrappers.<AuditNode>lambdaQuery().eq(AuditNode::getFlowId, flow.getId()).orderByAsc(AuditNode::getNodeOrder).last("LIMIT 1")); if (node == null) throw business("订单审核流程未配置"); AuditRecord r = new AuditRecord(); r.setBizType(4); r.setBizId(order.getId()); r.setBizNo(order.getOrderNo()); r.setBizSummary("订单审核：" + order.getOrderNo()); r.setFlowNodeId(node.getId()); r.setNodeName(node.getNodeName()); r.setStatus(0); r.setApplicantId(order.getUserId()); r.setApplyTime(LocalDateTime.now()); auditRecordMapper.insert(r); order.setAuditNodeId(node.getId()); orderMapper.updateById(order); messageService.sendTodo(node.getId(), 4, order.getId()); }
     private void cancelAndRestore(OrderMain order) {
         if (order == null) return;
         int updated = orderMapper.update(null, Wrappers.<OrderMain>update()
                 .eq("id", order.getId())
                 .eq("deleted", 0)
-                .ne("order_status", StatusEnums.OrderStatus.CANCELLED.value)
+                .eq("order_status", order.getOrderStatus())
                 .set("order_status", StatusEnums.OrderStatus.CANCELLED.value)
                 .set("cancel_time", LocalDateTime.now()));
         if (updated == 0) return;
         for (OrderDetail d : details(order.getId())) {
-            productMapper.update(null, Wrappers.<Product>lambdaUpdate()
+            int stockUpdated = productMapper.update(null, Wrappers.<Product>lambdaUpdate()
                     .eq(Product::getId, d.getProductId())
                     .setSql("stock = stock + " + d.getQuantity()));
+            if (stockUpdated != 1) throw new IllegalStateException("订单 " + order.getOrderNo() + " 的库存回补失败，商品ID=" + d.getProductId());
         }
         order.setOrderStatus(StatusEnums.OrderStatus.CANCELLED.value);
         order.setCancelTime(LocalDateTime.now());

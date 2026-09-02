@@ -8,6 +8,10 @@ import com.nzxhjy.agri.common.redis.RedisUtils;
 import com.nzxhjy.agri.service.entity.OrderDetail;
 import com.nzxhjy.agri.service.entity.OrderMain;
 import com.nzxhjy.agri.service.entity.Product;
+import com.nzxhjy.agri.service.entity.AuditFlow;
+import com.nzxhjy.agri.service.entity.AuditNode;
+import com.nzxhjy.agri.service.entity.WalletAccount;
+import com.nzxhjy.agri.service.entity.WalletTransaction;
 import com.nzxhjy.agri.service.mapper.*;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -16,6 +20,9 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.math.BigDecimal;
+import java.lang.reflect.Method;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
 
@@ -76,6 +83,48 @@ class OrderServiceTest {
         assertEquals("订单已支付", result.getMessage());
         verify(orderMapper, never()).updateById(any(OrderMain.class));
         verifyNoInteractions(walletMapper, transactionMapper, auditRecordMapper);
+    }
+
+    @Test
+    void walletPaymentReadsAccountWithLockAndRecordsLockedBalance() {
+        OrderMain order = order(11L, 7L, StatusEnums.OrderStatus.PENDING_PAYMENT.value,
+                StatusEnums.PayStatus.UNPAID.value);
+        WalletAccount account = new WalletAccount();
+        account.setId(3L);
+        account.setUserId(7L);
+        account.setBalance(new BigDecimal("20.00"));
+        when(orderMapper.selectOwnedByNoForUpdate(order.getOrderNo(), 7L)).thenReturn(order);
+        when(walletMapper.selectByUserIdForUpdate(7L)).thenReturn(account);
+        when(walletMapper.update(any(), any())).thenReturn(1);
+        AuditFlow flow = new AuditFlow();
+        flow.setId(4L);
+        flow.setBizType(StatusEnums.AuditBizType.ORDER.value);
+        flow.setEnabled(1);
+        AuditNode node = new AuditNode();
+        node.setId(5L);
+        node.setFlowId(flow.getId());
+        node.setNodeOrder(1);
+        when(auditFlowMapper.selectOne(any())).thenReturn(flow);
+        when(auditNodeMapper.selectOne(any())).thenReturn(node);
+
+        service.pay(7L, order.getOrderNo(), "WALLET");
+
+        verify(walletMapper).selectByUserIdForUpdate(7L);
+        verify(transactionMapper).insert(argThat((WalletTransaction tx) -> new BigDecimal("10.00").equals(tx.getBalanceAfter())));
+    }
+
+    @Test
+    void voucherPdfContainsXrefAndUnicodeText() throws Exception {
+        Method method = OrderService.class.getDeclaredMethod("simplePdf", String.class);
+        method.setAccessible(true);
+        byte[] pdf = (byte[]) method.invoke(service, "收货人：张三\n订单号：O-1");
+        String raw = new String(pdf, java.nio.charset.StandardCharsets.US_ASCII);
+
+        assertEquals(true, raw.startsWith("%PDF-1.4"));
+        assertEquals(true, raw.contains("/BaseFont/STSong-Light"));
+        assertEquals(true, raw.contains("xref\n"));
+        assertEquals(true, raw.contains("startxref\n"));
+        Files.write(Path.of("target/order-voucher-test.pdf"), pdf);
     }
 
     @Test
