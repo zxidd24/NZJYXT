@@ -12,7 +12,7 @@ dist/
 .idea/
 *.iml
 .vscode/
-
+.workbuddy/
 # Local configuration and secrets
 .env
 .env.*
