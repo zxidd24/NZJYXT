@@ -38,7 +38,6 @@ public class OrderService {
     private final PortalUserInfoMapper userInfoMapper;
     private final WalletAccountMapper walletMapper;
     private final WalletTransactionMapper transactionMapper;
-    private final RefundApplyMapper refundMapper;
     private final RedisUtils redisUtils;
     private final AuditFlowMapper auditFlowMapper;
     private final AuditNodeMapper auditNodeMapper;

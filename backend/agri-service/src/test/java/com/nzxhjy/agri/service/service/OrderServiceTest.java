@@ -1,13 +1,11 @@
 package com.nzxhjy.agri.service.service;
 
-import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.nzxhjy.agri.common.enums.ErrorCodeEnum;
 import com.nzxhjy.agri.common.enums.StatusEnums;
 import com.nzxhjy.agri.common.exception.BusinessException;
 import com.nzxhjy.agri.common.redis.RedisUtils;
 import com.nzxhjy.agri.service.entity.OrderDetail;
 import com.nzxhjy.agri.service.entity.OrderMain;
-import com.nzxhjy.agri.service.entity.Product;
 import com.nzxhjy.agri.service.entity.AuditFlow;
 import com.nzxhjy.agri.service.entity.AuditNode;
 import com.nzxhjy.agri.service.entity.WalletAccount;

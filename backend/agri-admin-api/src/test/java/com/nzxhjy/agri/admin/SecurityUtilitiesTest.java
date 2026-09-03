@@ -51,7 +51,7 @@ class SecurityUtilitiesTest {
         AuthTokenService tokenService = new AuthTokenService(jwtUtils, redisUtils);
 
         String token = tokenService.issue(9L, AuthConstants.ADMIN_CLIENT);
-        when(redisUtils.get(AuthConstants.tokenKey(9L))).thenReturn(token, null);
+        when(redisUtils.get(AuthConstants.tokenKey(9L))).thenReturn(token, (String) null);
 
         assertEquals(9L, tokenService.validate(token, AuthConstants.ADMIN_CLIENT));
         tokenService.revoke(9L);
