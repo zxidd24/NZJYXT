@@ -5,11 +5,17 @@ import { showToast } from "vant";
 import request from "../api/request";
 const router = useRouter();
 const profile = ref(null);
+const unreadCount = ref(0);
 onMounted(async () => {
   try {
     profile.value = await request.get("/api/portal/profile");
   } catch (error) {
     showToast(error.message || "加载失败");
+  }
+  try {
+    unreadCount.value = await request.get("/api/portal/message/unread-count");
+  } catch (_) {
+    unreadCount.value = 0;
   }
 });
 async function logout() {
@@ -23,7 +29,11 @@ async function logout() {
 <template>
   <section>
     <van-nav-bar title="个人中心" /><van-cell-group inset
-      ><van-cell title="消息中心" to="/messages" is-link /><van-cell title="我的订单" to="/orders" is-link /><van-cell
+      ><van-cell to="/messages" is-link
+        ><template #title
+          ><van-badge :dot="unreadCount > 0"><span>消息中心</span></van-badge></template
+        ></van-cell
+      ><van-cell title="我的订单" to="/orders" is-link /><van-cell
         title="我的钱包"
         to="/wallet"
         is-link /><van-cell title="发票信息" to="/invoice" is-link /><van-cell title="我的贷款" to="/loan" is-link /><van-cell
