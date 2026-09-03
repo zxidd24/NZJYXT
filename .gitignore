@@ -13,6 +13,8 @@ dist/
 *.iml
 .vscode/
 .workbuddy/
+# 本地交接记录（不上传仓库）
+/handoff.md
 # Local configuration and secrets
 .env
 .env.*
