@@ -1,13 +1,15 @@
 <script setup>
-import { computed, onMounted, reactive, ref } from "vue";
+import { computed, onMounted, onUnmounted, reactive, ref } from "vue";
 import { useRouter, useRoute } from "vue-router";
 import { ElMessage } from "element-plus";
 import request from "../api/request";
+import { useTaskBadge } from "../composables/useTaskBadge";
 
 const router = useRouter();
 const route = useRoute();
 const info = ref(null);
 const loading = ref(true);
+const { pendingCount, startPolling, stopPolling } = useTaskBadge();
 const passwordDialog = reactive({
   visible: false,
   oldPassword: "",
@@ -43,6 +45,12 @@ onMounted(async () => {
   } finally {
     loading.value = false;
   }
+  // 启动待办任务数量轮询，驱动侧边栏红点/数字提醒
+  startPolling(30000);
+});
+
+onUnmounted(() => {
+  stopPolling();
 });
 
 async function logout() {
@@ -78,8 +86,18 @@ async function changePassword() {
           v-for="menu in menus"
           :key="menu.path"
           :index="menu.path"
-          >{{ menu.label }}</el-menu-item
         >
+          <el-badge
+            v-if="menu.path === '/tasks'"
+            :value="pendingCount"
+            :max="99"
+            :hidden="pendingCount === 0"
+            class="menu-badge"
+          >
+            <span class="menu-label">{{ menu.label }}</span>
+          </el-badge>
+          <span v-else>{{ menu.label }}</span>
+        </el-menu-item>
       </el-menu>
     </el-aside>
     <el-container>
@@ -116,3 +134,16 @@ async function changePassword() {
     >
   </el-container>
 </template>
+
+<style scoped>
+.menu-badge {
+  display: inline-flex;
+  align-items: center;
+}
+.menu-badge :deep(.el-badge__content) {
+  position: static;
+  transform: none;
+  margin-left: 6px;
+}
+</style>
+

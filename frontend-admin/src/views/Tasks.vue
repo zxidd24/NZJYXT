@@ -2,7 +2,9 @@
 import { onMounted, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import request from "../api/request";
+import { useTaskBadge } from "../composables/useTaskBadge";
 
+const { fetchPendingCount } = useTaskBadge();
 const active = ref("pending");
 const pending = ref([]);
 const done = ref([]);
@@ -46,6 +48,8 @@ async function audit(row, approved) {
     });
     ElMessage.success("审核完成");
     await load();
+    // 审核完成后立即刷新侧边栏待办红点/数字
+    fetchPendingCount();
   } catch (error) {
     ElMessage.error(error.message || "审核失败");
   }
