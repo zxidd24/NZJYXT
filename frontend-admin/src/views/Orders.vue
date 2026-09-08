@@ -2,11 +2,13 @@
 import { onMounted, ref } from "vue";
 import { ElMessage } from "element-plus";
 import request from "../api/request";
+import { useOrderBadge } from "../composables/useOrderBadge";
+const { fetchPendingOrderCount } = useOrderBadge();
 const rows = ref([]); const loading = ref(false); const attachments = ref([]); const attachmentDialog = ref(false); const attachmentLoading = ref(false); const attachmentOrder = ref(null); const statusNames = ["待付款", "待审核", "待发货", "待收货", "已完成", "已取消", "退款中", "已退款"];
 const portalApiBase = import.meta.env.VITE_PORTAL_API_BASE_URL || "http://localhost:8081";
-async function load() { loading.value = true; try { const data = await request.get("/api/admin/order/page"); rows.value = data.list; } catch (e) { ElMessage.error(e.message || "订单加载失败"); } finally { loading.value = false; } }
-async function confirm(row) { try { await request.put("/api/admin/order/confirm", { orderId: row.id }); ElMessage.success("订单已完成"); await load(); } catch (e) { ElMessage.error(e.message || "确认失败"); } }
-async function ship(row) { const company = window.prompt("物流公司", "中通"); const trackingNo = window.prompt("物流单号"); if (!company || !trackingNo) return; try { await request.put("/api/admin/order/delivery", { orderId: row.id, company, trackingNo }); ElMessage.success("已登记发货"); await load(); } catch (e) { ElMessage.error(e.message || "发货失败"); } }
+async function load() { loading.value = true; try { const data = await request.get("/api/admin/order/page"); rows.value = data.list; fetchPendingOrderCount();} catch (e) { ElMessage.error(e.message || "订单加载失败"); } finally { loading.value = false; } }
+async function confirm(row) { try { await request.put("/api/admin/order/confirm", { orderId: row.id }); ElMessage.success("订单已完成"); await load();fetchPendingOrderCount(); } catch (e) { ElMessage.error(e.message || "确认失败"); } }
+async function ship(row) { const company = window.prompt("物流公司", "中通"); const trackingNo = window.prompt("物流单号"); if (!company || !trackingNo) return; try { await request.put("/api/admin/order/delivery", { orderId: row.id, company, trackingNo }); ElMessage.success("已登记发货"); await load();fetchPendingOrderCount(); } catch (e) { ElMessage.error(e.message || "发货失败"); } }
 async function viewAttachments(row) { attachmentOrder.value = row; attachmentDialog.value = true; attachmentLoading.value = true; try { const data = await request.get(`/api/admin/order/${row.id}/attachments`); attachments.value = (data || []).filter((item) => item.type === 1); } catch (e) { attachments.value = []; ElMessage.error(e.message || "附件加载失败"); } finally { attachmentLoading.value = false; } }
 function attachmentUrl(url) { return url && /^https?:\/\//.test(url) ? url : `${portalApiBase}${url || ""}`; }
 onMounted(load);

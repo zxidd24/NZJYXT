@@ -5,7 +5,7 @@ import request from "../api/request";
 
 const rows = ref([]);
 const loading = ref(false);
-const filters = reactive({ userType: "", creditGrade: "" });
+const filters = reactive({ userType: undefined, creditGrade: undefined });
 const dialog = reactive({ visible: false, row: null, grade: "C", limit: 0 });
 async function load() {
   loading.value = true;
@@ -58,73 +58,95 @@ onMounted(load);
       <h2>门户用户</h2>
       <el-button :loading="loading" @click="load">刷新</el-button>
     </div>
-    <el-form inline
-      ><el-form-item label="用户类型"
-        ><el-select v-model="filters.userType" clearable
-          ><el-option label="自然人" value="1" /><el-option
-            label="法人"
-            value="2" /></el-select></el-form-item
-      ><el-form-item label="信用等级"
-        ><el-select v-model="filters.creditGrade" clearable
-          ><el-option label="A" value="A" /><el-option
-            label="B"
-            value="B" /><el-option
-            label="C"
-            value="C" /></el-select></el-form-item
-      ><el-button type="primary" @click="load">查询</el-button></el-form
-    ><el-table :data="rows" v-loading="loading" stripe
-      ><el-table-column
+    <el-form inline class="filter-bar">
+      <el-form-item label="用户类型">
+        <el-select
+          v-model="filters.userType"
+          clearable
+          placeholder="全部类型"
+          style="width: 140px"
+        >
+          <el-option label="自然人" :value="1" />
+          <el-option label="法人" :value="2" />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="信用等级">
+        <el-select
+          v-model="filters.creditGrade"
+          clearable
+          placeholder="全部等级"
+          style="width: 140px"
+        >
+          <el-option label="A" value="A" />
+          <el-option label="B" value="B" />
+          <el-option label="C" value="C" />
+        </el-select>
+      </el-form-item>
+      <el-form-item>
+        <el-button type="primary" @click="load">查询</el-button>
+      </el-form-item>
+    </el-form>
+    <el-table :data="rows" v-loading="loading" stripe>
+      <el-table-column
         prop="userName"
         label="用户名称"
         min-width="150"
-      /><el-table-column prop="userType" label="类型" width="90"
-        ><template #default="scope">{{
+      />
+      <el-table-column prop="userType" label="类型" width="90">
+        <template #default="scope">{{
           scope.row.userType === 1 ? "自然人" : "法人"
-        }}</template></el-table-column
-      ><el-table-column
+        }}</template>
+      </el-table-column>
+      <el-table-column
         prop="contactName"
         label="联系人"
         width="120"
-      /><el-table-column
+      />
+      <el-table-column
         prop="phone"
         label="联系电话"
         width="140"
-      /><el-table-column
+      />
+      <el-table-column
         prop="creditGrade"
         label="商家等级"
         width="100"
-      /><el-table-column prop="authStatus" label="认证状态" width="100"
-        ><template #default="scope">{{
+      />
+      <el-table-column prop="authStatus" label="认证状态" width="100">
+        <template #default="scope">{{
           ["未认证", "审核中", "已认证", "已驳回"][scope.row.authStatus]
-        }}</template></el-table-column
-      ><el-table-column label="操作" width="180"
-        ><template #default="scope"
-          ><el-button link @click="detail(scope.row)">详情</el-button
-          ><el-button type="primary" link @click="openCredit(scope.row)"
+        }}</template>
+      </el-table-column>
+      <el-table-column label="操作" width="180">
+        <template #default="scope">
+          <el-button link @click="detail(scope.row)">详情</el-button>
+          <el-button type="primary" link @click="openCredit(scope.row)"
             >评级</el-button
-          ></template
-        ></el-table-column
-      ></el-table
-    ><el-dialog v-model="dialog.visible" title="用户评级" width="360px"
-      ><el-form label-width="90px"
-        ><el-form-item label="信用等级"
-          ><el-select v-model="dialog.grade"
-            ><el-option label="A" value="A" /><el-option
-              label="B"
-              value="B" /><el-option
-              label="C"
-              value="C" /></el-select></el-form-item
-        ><el-form-item label="授信额度"
-          ><el-input-number
+          >
+        </template>
+      </el-table-column>
+    </el-table>
+    <el-dialog v-model="dialog.visible" title="用户评级" width="360px">
+      <el-form label-width="90px">
+        <el-form-item label="信用等级">
+          <el-select v-model="dialog.grade">
+            <el-option label="A" value="A" />
+            <el-option label="B" value="B" />
+            <el-option label="C" value="C" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="授信额度">
+          <el-input-number
             v-model="dialog.limit"
             :min="0"
-            :precision="2" /></el-form-item></el-form
-      ><template #footer
-        ><el-button @click="dialog.visible = false">取消</el-button
-        ><el-button type="primary" @click="saveCredit"
-          >保存</el-button
-        ></template
-      ></el-dialog
-    >
+            :precision="2"
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="dialog.visible = false">取消</el-button>
+        <el-button type="primary" @click="saveCredit">保存</el-button>
+      </template>
+    </el-dialog>
   </section>
 </template>

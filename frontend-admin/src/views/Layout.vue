@@ -4,12 +4,14 @@ import { useRouter, useRoute } from "vue-router";
 import { ElMessage } from "element-plus";
 import request from "../api/request";
 import { useTaskBadge } from "../composables/useTaskBadge";
+import { useOrderBadge } from "../composables/useOrderBadge";
 
 const router = useRouter();
 const route = useRoute();
 const info = ref(null);
 const loading = ref(true);
-const { pendingCount, startPolling, stopPolling } = useTaskBadge();
+const { pendingCount, startPolling: startTaskPolling, stopPolling: stopTaskPolling } = useTaskBadge();
+const { pendingOrderCount, startPolling: startOrderPolling, stopPolling: stopOrderPolling } = useOrderBadge();
 const passwordDialog = reactive({
   visible: false,
   oldPassword: "",
@@ -46,11 +48,14 @@ onMounted(async () => {
     loading.value = false;
   }
   // 启动待办任务数量轮询，驱动侧边栏红点/数字提醒
-  startPolling(30000);
+  startTaskPolling(30000);
+  // 启动待处理订单数量轮询
+  startOrderPolling(30000);
 });
 
 onUnmounted(() => {
-  stopPolling();
+  stopTaskPolling();
+  stopOrderPolling();
 });
 
 async function logout() {
@@ -88,10 +93,10 @@ async function changePassword() {
           :index="menu.path"
         >
           <el-badge
-            v-if="menu.path === '/tasks'"
-            :value="pendingCount"
+            v-if="menu.path === '/tasks' || menu.path === '/orders'"
+            :value="menu.path === '/tasks' ? pendingCount : pendingOrderCount"
             :max="99"
-            :hidden="pendingCount === 0"
+            :hidden="(menu.path === '/tasks' ? pendingCount : pendingOrderCount) === 0"
             class="menu-badge"
           >
             <span class="menu-label">{{ menu.label }}</span>
@@ -146,4 +151,3 @@ async function changePassword() {
   margin-left: 6px;
 }
 </style>
-
