@@ -156,6 +156,14 @@ onMounted(load);
         ><el-descriptions-item label="营业执照号">{{
           detailDialog.bizDetail.businessLicense || "-"
         }}</el-descriptions-item
+        ><el-descriptions-item label="营业执照"
+          ><a
+            v-if="detailDialog.bizDetail.businessLicenseImg"
+            :href="imageUrl(detailDialog.bizDetail.businessLicenseImg)"
+            target="_blank"
+            >查看图片</a
+          ><span v-else>-</span
+          ></el-descriptions-item
         ><el-descriptions-item label="身份证正面"
           ><a
             :href="imageUrl(detailDialog.bizDetail.idCardFront)"
