@@ -1,9 +1,12 @@
 <script setup>
 import { onMounted, ref } from "vue";
 import { showToast } from "vant";
+import { areaList } from "@vant/area-data";
 import request from "../api/request";
 const rows = ref([]);
 const show = ref(false);
+const showAreaPicker = ref(false);
+const areaText = ref("");
 const editingId = ref(null);
 const form = ref({
   receiverName: "",
@@ -34,10 +37,29 @@ function open(row = null) {
         detailAddress: "",
         isDefault: 0,
       };
+  areaText.value = row
+    ? [row.province, row.city, row.district].filter(Boolean).join(" ")
+    : "";
   show.value = true;
 }
 async function save() {
   try {
+    if (!form.value.province || !form.value.city || !form.value.district) {
+      showToast("请选择所在地区");
+      return;
+    }
+    if (!form.value.receiverName.trim()) {
+      showToast("请填写收货人");
+      return;
+    }
+    if (!form.value.receiverPhone.trim()) {
+      showToast("请填写电话");
+      return;
+    }
+    if (!form.value.detailAddress.trim()) {
+      showToast("请填写详细地址");
+      return;
+    }
     if (editingId.value)
       await request.put(`/api/portal/address/${editingId.value}`, form.value);
     else await request.post("/api/portal/address", form.value);
@@ -62,6 +84,17 @@ async function setDefault(id) {
   } catch (error) {
     showToast(error.message || "设置失败");
   }
+}
+function onAreaConfirm(event = {}) {
+  const options = event.selectedOptions || [];
+  const getName = (opt) => (opt ? opt.text || opt.name || "" : "");
+  form.value.province = getName(options[0]);
+  form.value.city = getName(options[1]);
+  form.value.district = getName(options[2]);
+  areaText.value = [form.value.province, form.value.city, form.value.district]
+    .filter(Boolean)
+    .join(" ");
+  showAreaPicker.value = false;
 }
 onMounted(load);
 </script>
@@ -110,10 +143,11 @@ onMounted(load);
           ><van-field v-model="form.receiverName" label="收货人" /><van-field
             v-model="form.receiverPhone"
             label="电话" /><van-field
-            v-model="form.province"
-            label="省" /><van-field v-model="form.city" label="市" /><van-field
-            v-model="form.district"
-            label="区县" /><van-field
+            v-model="areaText"
+            label="所在地区"
+            readonly
+            placeholder="请选择省/市/区"
+            @click="showAreaPicker = true" /><van-field
             v-model="form.detailAddress"
             label="详细地址" /><van-field label="默认地址"
             ><template #input
@@ -128,6 +162,12 @@ onMounted(load);
           >
         </div></van-form
       ></van-popup
+    ><van-popup v-model:show="showAreaPicker" position="bottom" round
+      ><van-area
+        :area-list="areaList"
+        @confirm="onAreaConfirm"
+        @cancel="showAreaPicker = false"
+      /></van-popup
     >
   </section>
 </template>
