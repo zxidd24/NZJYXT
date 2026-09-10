@@ -9,6 +9,7 @@
     "preview": "vite preview --port 3001"
   },
   "dependencies": {
+    "@vant/area-data": "^1.5.1",
     "axios": "^1.7.9",
     "pinia": "^2.3.0",
     "vant": "^4.9.14",
