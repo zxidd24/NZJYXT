@@ -18,7 +18,7 @@ async function load() {
     const [recommend, tree, news] = await Promise.all([request.get("/api/portal/product/recommend"), request.get("/api/portal/category/tree"), request.get("/api/portal/article/list", { params: { limit: 5 } })]);
     products.value = recommend;
     articles.value = news;
-    categories.value = tree.flatMap((item) => [item, ...(item.children || [])]).slice(0, 8);
+    categories.value = tree.slice(0, 8);
   } catch (error) { showToast(error.message || "商品加载失败"); }
 }
 function search() { router.push({ path: "/category", query: { keyword: keyword.value } }); }
