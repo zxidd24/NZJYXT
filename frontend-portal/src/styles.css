@@ -35,13 +35,15 @@ body {
 }
 .category-layout { display: flex; min-height: calc(100vh - 150px); }
 .category-products { flex: 1; min-width: 0; background: #fff; }
+.category-child-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+.category-child-tag { padding: 3px 10px; cursor: pointer; font-size: 13px; white-space: nowrap; color: #000000; background: transparent; border: none; }
+.category-child-tag.active { background-color: #1989fa; border: 1px solid #1989fa; color: #ffffff; border-radius: 3px; }
 .product-swiper { height: 260px; background: #fff; }
 .product-swiper img { width: 100%; height: 100%; object-fit: contain; }
 .product-price { color: #ee0a24; font-size: 22px; font-weight: 600; }
 .product-cart-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
 .cart-page .van-submit-bar, .product-detail-page .van-action-bar { bottom: 50px; }
 .address-select { max-width: 70vw; border: 0; background: transparent; color: #323233; font-size: 14px; text-align: right; }
-
 /* Keep imperative Vant toast content readable when host styles override Vant defaults. */
 .van-toast {
   color: #fff !important;
