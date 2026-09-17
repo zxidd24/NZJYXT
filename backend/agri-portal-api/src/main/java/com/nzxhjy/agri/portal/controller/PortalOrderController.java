@@ -26,6 +26,7 @@ public class PortalOrderController {
     private final OrderService orderService;
     @GetMapping("/token") public Result<String> token() { return Result.success(orderService.orderToken(UserContext.getUserId())); }
     @PostMapping("/create") public Result<OrderService.OrderView> create(@Valid @RequestBody CreateRequest r) { return Result.success(orderService.create(UserContext.getUserId(), r.token, r.addressId, r.items, r.buyerNote)); }
+    @PostMapping("/checkout") public Result<OrderService.PayResult> checkout(@Valid @RequestBody CreateRequest r) { return Result.success(orderService.checkout(UserContext.getUserId(), r.token, r.addressId, r.items, r.buyerNote)); }
     @PostMapping("/pay") public Result<OrderService.PayResult> pay(@Valid @RequestBody PayRequest r) { return Result.success(orderService.pay(UserContext.getUserId(), r.orderNo, r.payMethod)); }
     @GetMapping("/page") public Result<PageResult<OrderService.OrderView>> page(@RequestParam(defaultValue="1") int pageNum, @RequestParam(defaultValue="10") int pageSize, @RequestParam(required=false) Integer status) { return Result.success(orderService.page(UserContext.getUserId(), pageNum, Math.min(pageSize, 100), status)); }
     @GetMapping("/{id}") public Result<OrderService.OrderView> detail(@PathVariable Long id) { return Result.success(orderService.detail(id, UserContext.getUserId())); }

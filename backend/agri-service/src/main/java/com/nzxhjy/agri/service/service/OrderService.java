@@ -109,6 +109,13 @@ public class OrderService {
     }
 
     @Transactional
+    public PayResult checkout(Long userId, String token, Long addressId, List<ItemCommand> items, String buyerNote) {
+        // 创建订单和钱包支付共用事务，支付失败时回滚库存、购物车和订单。
+        OrderView order = create(userId, token, addressId, items, buyerNote);
+        return pay(userId, order.getOrderNo(), "WALLET");
+    }
+
+    @Transactional
     public PayResult pay(Long userId, String orderNo, String payMethod) {
         OrderMain order = orderMapper.selectOwnedByNoForUpdate(orderNo, userId);
         if (order == null) throw business("订单不存在");
