@@ -4,6 +4,9 @@ import com.nzxhjy.agri.common.enums.ErrorCodeEnum;
 import com.nzxhjy.agri.common.enums.StatusEnums;
 import com.nzxhjy.agri.common.exception.BusinessException;
 import com.nzxhjy.agri.common.redis.RedisUtils;
+import com.nzxhjy.agri.service.entity.PortalUserInfo;
+import com.nzxhjy.agri.service.entity.Product;
+import com.nzxhjy.agri.service.entity.UserAddress;
 import com.nzxhjy.agri.service.entity.OrderDetail;
 import com.nzxhjy.agri.service.entity.OrderMain;
 import com.nzxhjy.agri.service.entity.AuditFlow;
@@ -16,6 +19,12 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.aop.framework.ProxyFactory;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.TransactionStatus;
+import org.springframework.transaction.annotation.AnnotationTransactionAttributeSource;
+import org.springframework.transaction.interceptor.TransactionInterceptor;
 
 import java.math.BigDecimal;
 import java.lang.reflect.Method;
@@ -154,6 +163,130 @@ class OrderServiceTest {
 
         assertEquals(ErrorCodeEnum.BUSINESS_ERROR.getCode(), exception.getCode());
         verify(orderMapper, never()).insert(any(OrderMain.class));
+    }
+
+    @Test
+    void checkoutRollsBackWholeTransactionWhenBalanceIsInsufficient() {
+        prepareCheckout(new BigDecimal("9.99"));
+        PlatformTransactionManager manager = mock(PlatformTransactionManager.class);
+        TransactionStatus status = mock(TransactionStatus.class);
+        OrderService checkoutService = transactionalService(manager, status);
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> checkoutService.checkout(7L, "token", 1L, List.of(new OrderService.ItemCommand(3L, 1)), null));
+
+        assertEquals("钱包余额不足", exception.getMessage());
+        // 确认已执行的库存、购物车和订单写入都属于最终回滚的同一个事务。
+        verify(productMapper).update(isNull(), any());
+        verify(cartMapper).delete(any());
+        verify(orderMapper).insert(any(OrderMain.class));
+        verify(manager).rollback(status);
+        verify(manager, never()).commit(any());
+        verify(walletMapper, never()).update(any(), any());
+        verifyNoInteractions(transactionMapper, auditRecordMapper);
+    }
+
+    @Test
+    void checkoutRollsBackWhenConditionalWalletDebitFails() {
+        prepareCheckout(new BigDecimal("10.00"));
+        PlatformTransactionManager manager = mock(PlatformTransactionManager.class);
+        TransactionStatus status = mock(TransactionStatus.class);
+        OrderService checkoutService = transactionalService(manager, status);
+        when(walletMapper.update(any(), any())).thenReturn(0);
+
+        assertThrows(BusinessException.class,
+                () -> checkoutService.checkout(7L, "token", 1L, List.of(new OrderService.ItemCommand(3L, 1)), null));
+
+        verify(manager).rollback(status);
+        verify(manager, never()).commit(any());
+        verifyNoInteractions(transactionMapper, auditRecordMapper);
+    }
+
+    @Test
+    void checkoutCommitsOnceWhenBalanceExactlyCoversPayment() {
+        OrderMain order = prepareCheckout(new BigDecimal("10.00"));
+        PlatformTransactionManager manager = mock(PlatformTransactionManager.class);
+        TransactionStatus status = mock(TransactionStatus.class);
+        OrderService checkoutService = transactionalService(manager, status);
+        when(walletMapper.update(any(), any())).thenReturn(1);
+        AuditFlow flow = new AuditFlow();
+        flow.setId(4L);
+        AuditNode node = new AuditNode();
+        node.setId(5L);
+        when(auditFlowMapper.selectOne(any())).thenReturn(flow);
+        when(auditNodeMapper.selectOne(any())).thenReturn(node);
+
+        OrderService.PayResult result = checkoutService.checkout(7L, "token", 1L,
+                List.of(new OrderService.ItemCommand(3L, 1)), null);
+
+        assertEquals(true, result.isSuccess());
+        assertEquals(StatusEnums.OrderStatus.PENDING_AUDIT.value, order.getOrderStatus());
+        assertEquals(StatusEnums.PayStatus.PAID.value, order.getPayStatus());
+        verify(productMapper).update(isNull(), any());
+        verify(cartMapper).delete(any());
+        verify(orderMapper).insert(any(OrderMain.class));
+        verify(walletMapper).update(isNull(), any());
+        verify(transactionMapper).insert(argThat((WalletTransaction tx) -> BigDecimal.ZERO.compareTo(tx.getBalanceAfter()) == 0));
+        verify(manager).commit(status);
+        verify(manager, never()).rollback(any());
+    }
+
+    @Test
+    void checkoutRollsBackPaymentWhenAuditCreationFails() {
+        prepareCheckout(new BigDecimal("20.00"));
+        PlatformTransactionManager manager = mock(PlatformTransactionManager.class);
+        TransactionStatus status = mock(TransactionStatus.class);
+        OrderService checkoutService = transactionalService(manager, status);
+        when(walletMapper.update(any(), any())).thenReturn(1);
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> checkoutService.checkout(7L, "token", 1L, List.of(new OrderService.ItemCommand(3L, 1)), null));
+
+        assertEquals("订单审核流程未配置", exception.getMessage());
+        verify(transactionMapper).insert(any(WalletTransaction.class));
+        verify(manager).rollback(status);
+        verify(manager, never()).commit(any());
+    }
+
+    private OrderService transactionalService(PlatformTransactionManager manager, TransactionStatus status) {
+        when(manager.getTransaction(any(TransactionDefinition.class))).thenReturn(status);
+        TransactionInterceptor interceptor = new TransactionInterceptor();
+        interceptor.setTransactionManager(manager);
+        interceptor.setTransactionAttributeSource(new AnnotationTransactionAttributeSource());
+        ProxyFactory factory = new ProxyFactory(service);
+        factory.addAdvice(interceptor);
+        return (OrderService) factory.getProxy();
+    }
+
+    private OrderMain prepareCheckout(BigDecimal balance) {
+        when(redisUtils.get("agri:order:token:token")).thenReturn("7");
+        PortalUserInfo info = new PortalUserInfo();
+        info.setAuthStatus(StatusEnums.AuthStatus.VERIFIED.value);
+        when(userInfoMapper.selectById(7L)).thenReturn(info);
+        UserAddress address = new UserAddress();
+        address.setDetailAddress("测试收货地址");
+        when(addressMapper.selectOne(any())).thenReturn(address);
+        Product product = new Product();
+        product.setId(3L);
+        product.setStatus(StatusEnums.ProductStatus.ON_SALE.value);
+        product.setPrice(new BigDecimal("10.00"));
+        when(productMapper.selectById(3L)).thenReturn(product);
+        when(productMapper.update(any(), any())).thenReturn(1);
+        OrderMain order = order(11L, 7L, StatusEnums.OrderStatus.PENDING_PAYMENT.value,
+                StatusEnums.PayStatus.UNPAID.value);
+        when(orderMapper.insert(any(OrderMain.class))).thenAnswer(invocation -> {
+            OrderMain created = invocation.getArgument(0);
+            created.setId(order.getId());
+            return 1;
+        });
+        when(orderMapper.selectById(11L)).thenReturn(order);
+        when(orderMapper.selectOwnedByNoForUpdate(order.getOrderNo(), 7L)).thenReturn(order);
+        WalletAccount account = new WalletAccount();
+        account.setId(3L);
+        account.setUserId(7L);
+        account.setBalance(balance);
+        when(walletMapper.selectByUserIdForUpdate(7L)).thenReturn(account);
+        return order;
     }
 
     private OrderMain order(Long id, Long userId, int status, int payStatus) {
