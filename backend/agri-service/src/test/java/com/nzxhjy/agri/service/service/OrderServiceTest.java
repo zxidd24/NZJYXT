@@ -1,5 +1,8 @@
 package com.nzxhjy.agri.service.service;
 
+import com.baomidou.mybatisplus.core.MybatisConfiguration;
+import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
+import org.apache.ibatis.builder.MapperBuilderAssistant;
 import com.nzxhjy.agri.common.enums.ErrorCodeEnum;
 import com.nzxhjy.agri.common.enums.StatusEnums;
 import com.nzxhjy.agri.common.exception.BusinessException;
@@ -9,12 +12,15 @@ import com.nzxhjy.agri.service.entity.Product;
 import com.nzxhjy.agri.service.entity.UserAddress;
 import com.nzxhjy.agri.service.entity.OrderDetail;
 import com.nzxhjy.agri.service.entity.OrderMain;
+import com.nzxhjy.agri.service.entity.AuditRecord;
 import com.nzxhjy.agri.service.entity.AuditFlow;
 import com.nzxhjy.agri.service.entity.AuditNode;
 import com.nzxhjy.agri.service.entity.WalletAccount;
 import com.nzxhjy.agri.service.entity.WalletTransaction;
 import com.nzxhjy.agri.service.mapper.*;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
@@ -246,6 +252,159 @@ class OrderServiceTest {
         verify(transactionMapper).insert(any(WalletTransaction.class));
         verify(manager).rollback(status);
         verify(manager, never()).commit(any());
+    }
+
+    @ParameterizedTest
+    @ValueSource(longs = {5L, 6L})
+    void rejectionAtEitherAuditNodeRefundsWalletOnce(Long nodeId) {
+        OrderMain order = prepareRejection(nodeId, "WALLET");
+        prepareRestoredStock();
+        prepareRefundWallet();
+        when(walletMapper.update(any(), any())).thenReturn(1);
+        when(transactionMapper.insert(any(WalletTransaction.class))).thenReturn(1);
+        when(auditRecordMapper.update(any(), any())).thenReturn(1, 0);
+        PlatformTransactionManager manager = mock(PlatformTransactionManager.class);
+        TransactionStatus status = mock(TransactionStatus.class);
+        OrderService auditService = transactionalService(manager, status);
+
+        auditService.auditOrder(9L, 21L, false, "审核不通过");
+        assertThrows(BusinessException.class,
+                () -> auditService.auditOrder(9L, 21L, false, "重复驳回"));
+
+        assertEquals(StatusEnums.OrderStatus.CANCELLED.value, order.getOrderStatus());
+        verify(productMapper).update(isNull(), any());
+        verify(walletMapper).selectByUserIdForUpdate(7L);
+        verify(walletMapper).update(isNull(), any());
+        verify(transactionMapper).insert(argThat((WalletTransaction tx) ->
+                Long.valueOf(7L).equals(tx.getUserId()) && Long.valueOf(11L).equals(tx.getOrderId())
+                        && new BigDecimal("10.00").equals(tx.getAmount())
+                        && new BigDecimal("30.00").equals(tx.getBalanceAfter())
+                        && tx.getDirection() == StatusEnums.WalletDirection.IN.value
+                        && tx.getTransType() == StatusEnums.WalletTransactionType.REFUND.value
+                        && tx.getTransStatus() == StatusEnums.WalletTransactionStatus.SUCCESS.value));
+        verify(manager).commit(status);
+        verify(manager).rollback(status);
+    }
+
+    @Test
+    void rejectionRollsBackWhenWalletRefundFails() {
+        prepareRejection(5L, "WALLET");
+        prepareRestoredStock();
+        prepareRefundWallet();
+        when(walletMapper.update(any(), any())).thenReturn(0);
+        PlatformTransactionManager manager = mock(PlatformTransactionManager.class);
+        TransactionStatus status = mock(TransactionStatus.class);
+        OrderService auditService = transactionalService(manager, status);
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> auditService.auditOrder(9L, 21L, false, "审核不通过"));
+
+        assertEquals("钱包退款失败", exception.getMessage());
+        verify(manager).rollback(status);
+        verify(manager, never()).commit(any());
+        verifyNoInteractions(transactionMapper, messageService);
+    }
+
+    @Test
+    void rejectionRollsBackWhenRefundTransactionCannotBeRecorded() {
+        prepareRejection(5L, "WALLET");
+        prepareRestoredStock();
+        prepareRefundWallet();
+        when(walletMapper.update(any(), any())).thenReturn(1);
+        when(transactionMapper.insert(any(WalletTransaction.class))).thenReturn(0);
+        PlatformTransactionManager manager = mock(PlatformTransactionManager.class);
+        TransactionStatus status = mock(TransactionStatus.class);
+        OrderService auditService = transactionalService(manager, status);
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> auditService.auditOrder(9L, 21L, false, "审核不通过"));
+
+        assertEquals("退款流水记录失败", exception.getMessage());
+        verify(manager).rollback(status);
+        verify(manager, never()).commit(any());
+        verifyNoInteractions(messageService);
+    }
+
+    @Test
+    void rejectionDoesNotRefundWhenOrderStatusChangesConcurrently() {
+        prepareRejection(5L, "WALLET");
+        when(orderMapper.update(any(), any())).thenReturn(0);
+
+        assertThrows(BusinessException.class,
+                () -> service.auditOrder(9L, 21L, false, "审核不通过"));
+
+        verifyNoInteractions(productMapper, walletMapper, transactionMapper, messageService);
+    }
+
+    @Test
+    void rejectionOfAlreadyCancelledOrderDoesNotRefundAgain() {
+        OrderMain order = prepareRejection(5L, "WALLET");
+        order.setOrderStatus(StatusEnums.OrderStatus.CANCELLED.value);
+
+        assertThrows(BusinessException.class,
+                () -> service.auditOrder(9L, 21L, false, "审核不通过"));
+
+        verifyNoInteractions(productMapper, walletMapper, transactionMapper, messageService);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"BANK_TRANSFER", "CREDIT"})
+    void rejectionDoesNotCreditWalletForOtherPaymentMethods(String method) {
+        prepareRejection(5L, method);
+        prepareRestoredStock();
+
+        service.auditOrder(9L, 21L, false, "审核不通过");
+
+        verify(productMapper).update(isNull(), any());
+        verifyNoInteractions(walletMapper, transactionMapper);
+    }
+
+    @Test
+    void auditApprovalDoesNotRefundWallet() {
+        OrderMain order = prepareRejection(5L, "WALLET");
+        AuditNode current = new AuditNode();
+        current.setFlowId(4L);
+        current.setNodeOrder(2);
+        when(auditNodeMapper.selectById(5L)).thenReturn(current);
+
+        service.auditOrder(9L, 21L, true, null);
+
+        assertEquals(StatusEnums.OrderStatus.PENDING_SHIPMENT.value, order.getOrderStatus());
+        verifyNoInteractions(productMapper, walletMapper, transactionMapper);
+    }
+
+    private OrderMain prepareRejection(Long nodeId, String method) {
+        TableInfoHelper.initTableInfo(new MapperBuilderAssistant(new MybatisConfiguration(), ""), AuditRecord.class);
+        AuditRecord record = new AuditRecord();
+        record.setId(21L);
+        record.setBizType(StatusEnums.AuditBizType.ORDER.value);
+        record.setBizId(11L);
+        record.setFlowNodeId(nodeId);
+        when(auditRecordMapper.selectById(21L)).thenReturn(record);
+        when(accessControlService.isSuperAdmin(9L)).thenReturn(true);
+        when(auditRecordMapper.update(any(), any())).thenReturn(1);
+        OrderMain order = order(11L, 7L, StatusEnums.OrderStatus.PENDING_AUDIT.value,
+                StatusEnums.PayStatus.PAID.value);
+        order.setPayMethod(method);
+        when(orderMapper.selectById(11L)).thenReturn(order);
+        return order;
+    }
+
+    private void prepareRestoredStock() {
+        when(orderMapper.update(any(), any())).thenReturn(1);
+        OrderDetail detail = new OrderDetail();
+        detail.setProductId(3L);
+        detail.setQuantity(2);
+        when(detailMapper.selectList(any())).thenReturn(List.of(detail));
+        when(productMapper.update(any(), any())).thenReturn(1);
+    }
+
+    private void prepareRefundWallet() {
+        WalletAccount account = new WalletAccount();
+        account.setId(3L);
+        account.setUserId(7L);
+        account.setBalance(new BigDecimal("20.00"));
+        when(walletMapper.selectByUserIdForUpdate(7L)).thenReturn(account);
     }
 
     private OrderService transactionalService(PlatformTransactionManager manager, TransactionStatus status) {

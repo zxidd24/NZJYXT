@@ -173,7 +173,13 @@ public class OrderService {
     public void auditOrder(Long auditorId, Long recordId, boolean approved, String remark) {
         AuditRecord record = auditRecordMapper.selectById(recordId); if (record == null || record.getBizType() != StatusEnums.AuditBizType.ORDER.value) throw business("订单审核任务不存在"); if (!canAudit(auditorId, record)) throw new BusinessException(ErrorCodeEnum.FORBIDDEN.getCode(), ErrorCodeEnum.FORBIDDEN.getMessage()); if (!approved && (remark == null || remark.isBlank())) throw business("驳回时必须填写原因");
         int updated = auditRecordMapper.update(null, Wrappers.<AuditRecord>lambdaUpdate().eq(AuditRecord::getId, recordId).eq(AuditRecord::getStatus, 0).set(AuditRecord::getStatus, approved ? 1 : 2).set(AuditRecord::getAuditorId, auditorId).set(AuditRecord::getAuditTime, LocalDateTime.now()).set(AuditRecord::getRemark, remark)); if (updated == 0) throw new BusinessException(ErrorCodeEnum.DUPLICATE_SUBMIT.getCode(), "该任务已处理");
-        OrderMain order = orderMapper.selectById(record.getBizId()); if (!approved) { cancelAndRestore(order); notifyAudit(order, "驳回", remark); return; }
+        OrderMain order = orderMapper.selectById(record.getBizId());
+        if (order == null || !Integer.valueOf(StatusEnums.OrderStatus.PENDING_AUDIT.value).equals(order.getOrderStatus())) throw business("当前订单不可审核");
+        if (!approved) {
+            if (!cancelAndRestore(order)) throw business("订单状态已变更，请刷新后重试");
+            notifyAudit(order, "驳回", remark);
+            return;
+        }
         AuditNode current = auditNodeMapper.selectById(record.getFlowNodeId()); AuditNode next = auditNodeMapper.selectOne(Wrappers.<AuditNode>lambdaQuery().eq(AuditNode::getFlowId, current.getFlowId()).gt(AuditNode::getNodeOrder, current.getNodeOrder()).orderByAsc(AuditNode::getNodeOrder).last("LIMIT 1"));
         if (next != null) { AuditRecord nextRecord = new AuditRecord(); nextRecord.setBizType(4); nextRecord.setBizId(order.getId()); nextRecord.setBizNo(order.getOrderNo()); nextRecord.setBizSummary("订单审核：" + order.getOrderNo()); nextRecord.setFlowNodeId(next.getId()); nextRecord.setNodeName(next.getNodeName()); nextRecord.setStatus(0); nextRecord.setApplicantId(order.getUserId()); nextRecord.setApplyTime(LocalDateTime.now()); auditRecordMapper.insert(nextRecord); order.setAuditNodeId(next.getId()); orderMapper.updateById(order); }
         else { order.setOrderStatus(StatusEnums.OrderStatus.PENDING_SHIPMENT.value); orderMapper.updateById(order); }
@@ -213,23 +219,45 @@ public class OrderService {
         transactionMapper.insert(tx);
     }
     private void createOrderAudit(OrderMain order) { AuditFlow flow = auditFlowMapper.selectOne(Wrappers.<AuditFlow>lambdaQuery().eq(AuditFlow::getBizType, 4).eq(AuditFlow::getEnabled, 1)); AuditNode node = flow == null ? null : auditNodeMapper.selectOne(Wrappers.<AuditNode>lambdaQuery().eq(AuditNode::getFlowId, flow.getId()).orderByAsc(AuditNode::getNodeOrder).last("LIMIT 1")); if (node == null) throw business("订单审核流程未配置"); AuditRecord r = new AuditRecord(); r.setBizType(4); r.setBizId(order.getId()); r.setBizNo(order.getOrderNo()); r.setBizSummary("订单审核：" + order.getOrderNo()); r.setFlowNodeId(node.getId()); r.setNodeName(node.getNodeName()); r.setStatus(0); r.setApplicantId(order.getUserId()); r.setApplyTime(LocalDateTime.now()); auditRecordMapper.insert(r); order.setAuditNodeId(node.getId()); orderMapper.updateById(order); messageService.sendTodo(node.getId(), 4, order.getId()); }
-    private void cancelAndRestore(OrderMain order) {
-        if (order == null) return;
+    private boolean cancelAndRestore(OrderMain order) {
+        if (order == null || (!Integer.valueOf(StatusEnums.OrderStatus.PENDING_PAYMENT.value).equals(order.getOrderStatus())
+                && !Integer.valueOf(StatusEnums.OrderStatus.PENDING_AUDIT.value).equals(order.getOrderStatus()))) return false;
         int updated = orderMapper.update(null, Wrappers.<OrderMain>update()
                 .eq("id", order.getId())
                 .eq("deleted", 0)
                 .eq("order_status", order.getOrderStatus())
                 .set("order_status", StatusEnums.OrderStatus.CANCELLED.value)
                 .set("cancel_time", LocalDateTime.now()));
-        if (updated == 0) return;
+        if (updated == 0) return false;
         for (OrderDetail d : details(order.getId())) {
             int stockUpdated = productMapper.update(null, Wrappers.<Product>lambdaUpdate()
                     .eq(Product::getId, d.getProductId())
                     .setSql("stock = stock + " + d.getQuantity()));
             if (stockUpdated != 1) throw new IllegalStateException("订单 " + order.getOrderNo() + " 的库存回补失败，商品ID=" + d.getProductId());
         }
+        // 仅成功取消订单的事务执行退款，避免重复驳回造成重复入账。
+        if (Integer.valueOf(StatusEnums.PayStatus.PAID.value).equals(order.getPayStatus())
+                && "WALLET".equalsIgnoreCase(order.getPayMethod())) refundToWallet(order);
         order.setOrderStatus(StatusEnums.OrderStatus.CANCELLED.value);
         order.setCancelTime(LocalDateTime.now());
+        return true;
+    }
+    private void refundToWallet(OrderMain order) {
+        BigDecimal amount = order.getPayAmount();
+        if (amount == null || amount.signum() < 0) throw business("订单实付金额异常，无法退款");
+        WalletAccount account = walletMapper.selectByUserIdForUpdate(order.getUserId());
+        if (account == null || account.getBalance() == null) throw business("钱包账户异常，无法退款");
+        int updated = walletMapper.update(null, Wrappers.<WalletAccount>lambdaUpdate()
+                .eq(WalletAccount::getId, account.getId())
+                .setSql("balance = balance + " + amount.toPlainString()));
+        if (updated != 1) throw business("钱包退款失败");
+        WalletTransaction tx = new WalletTransaction();
+        tx.setUserId(order.getUserId()); tx.setOrderId(order.getId()); tx.setTransNo(generateNo("T"));
+        tx.setAmount(amount); tx.setDirection(StatusEnums.WalletDirection.IN.value);
+        tx.setTransType(StatusEnums.WalletTransactionType.REFUND.value);
+        tx.setTransStatus(StatusEnums.WalletTransactionStatus.SUCCESS.value);
+        tx.setBalanceAfter(account.getBalance().add(amount)); tx.setRemark("订单审核驳回退款");
+        if (transactionMapper.insert(tx) != 1) throw business("退款流水记录失败");
     }
     private boolean canAudit(Long userId, AuditRecord record) { if (accessControlService.isSuperAdmin(userId)) return true; AuditNode node = auditNodeMapper.selectById(record.getFlowNodeId()); return node != null && accessControlService.roleIds(userId).contains(node.getRoleId()); }
     private void notifyAudit(OrderMain order, String result, String remark) { messageService.send(order.getUserId(), "ORDER_AUDIT_RESULT", 4, order.getId(), java.util.Map.of("订单号", order.getOrderNo(), "结果", result, "备注", remark == null ? "" : remark)); }
