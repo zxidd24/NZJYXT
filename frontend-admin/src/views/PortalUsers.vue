@@ -2,6 +2,9 @@
 import { onMounted, reactive, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import request from "../api/request";
+import ListPagination from "../components/ListPagination.vue";
+import { usePagination } from "../composables/usePagination";
+const { pagination, fetchPage } = usePagination();
 
 const rows = ref([]);
 const loading = ref(false);
@@ -10,12 +13,13 @@ const dialog = reactive({ visible: false, row: null, grade: "C", limit: 0 });
 async function load() {
   loading.value = true;
   try {
-    const data = await request.get("/api/admin/portal-user/page", {
+    const data = await fetchPage((params) => request.get("/api/admin/portal-user/page", {
       params: {
+        ...params,
         userType: filters.userType || undefined,
         creditGrade: filters.creditGrade || undefined,
       },
-    });
+    }));
     rows.value = data.list;
   } catch (error) {
     ElMessage.error(error.message || "用户加载失败");
@@ -48,6 +52,10 @@ async function detail(row) {
     `认证状态：${["未认证", "审核中", "已认证", "已驳回"][data.authStatus]}\n订单量：${data.orderCount}\n完成交易额：${data.completedOrderAmount}`,
     "用户详情",
   );
+}
+function search() {
+  pagination.pageNum = 1;
+  return load();
 }
 onMounted(load);
 </script>
@@ -83,7 +91,7 @@ onMounted(load);
         </el-select>
       </el-form-item>
       <el-form-item>
-        <el-button type="primary" @click="load">查询</el-button>
+        <el-button type="primary" @click="search">查询</el-button>
       </el-form-item>
     </el-form>
     <el-table :data="rows" v-loading="loading" stripe>
@@ -126,6 +134,8 @@ onMounted(load);
         </template>
       </el-table-column>
     </el-table>
+    <ListPagination :pagination="pagination" :disabled="loading" @change="load" />
+
     <el-dialog v-model="dialog.visible" title="用户评级" width="360px">
       <el-form label-width="90px">
         <el-form-item label="信用等级">

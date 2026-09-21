@@ -2,6 +2,9 @@
 import { onMounted, ref } from "vue";
 import { ElMessage } from "element-plus";
 import request from "../api/request";
+import ListPagination from "../components/ListPagination.vue";
+import { usePagination } from "../composables/usePagination";
+const { pagination, fetchPage } = usePagination();
 
 const tab = ref("refund");
 const loading = ref(false);
@@ -13,11 +16,15 @@ const invoiceStatusNames = ["待开票", "已开票", "驳回"];
 async function load() {
   loading.value = true;
   try {
-    if (tab.value === "refund") rows.value = (await request.get("/api/admin/refund/page")).list;
-    if (tab.value === "comment") rows.value = (await request.get("/api/admin/comment/page")).list;
-    if (tab.value === "invoice") rows.value = (await request.get("/api/admin/invoice/page")).list;
-    if (tab.value === "loan") rows.value = (await request.get("/api/admin/loan/page")).list;
-    if (tab.value === "account") rows.value = (await request.get("/api/admin/finance/account-detail")).list;
+    const endpoints = {
+      refund: "/api/admin/refund/page",
+      comment: "/api/admin/comment/page",
+      invoice: "/api/admin/invoice/page",
+      loan: "/api/admin/loan/page",
+      account: "/api/admin/finance/account-detail",
+    };
+    const data = await fetchPage((params) => request.get(endpoints[tab.value], { params }));
+    rows.value = data.list;
   } catch (error) { ElMessage.error(error.message || "加载失败"); }
   finally { loading.value = false; }
 }
@@ -26,12 +33,16 @@ async function issue(row) { const invoiceNo = window.prompt("发票号码"); if 
 async function rejectInvoice(row) { try { await request.post(`/api/admin/invoice/${row.id}/reject`, { remark: window.prompt("驳回原因", "信息有误") || "" }); ElMessage.success("已驳回"); await load(); } catch (error) { ElMessage.error(error.message || "操作失败"); } }
 async function auditLoan(row, approved) { const remark = approved ? "" : window.prompt("驳回原因", "授信资料不符合要求"); if (!approved && !remark) return; try { await request.post(`/api/admin/loan/${row.id}/audit`, { approved, remark }); ElMessage.success("处理成功"); await load(); } catch (error) { ElMessage.error(error.message || "处理失败"); } }
 async function loanAction(row, action) { try { await request.post(`/api/admin/loan/${row.id}/${action}`); ElMessage.success("操作成功"); await load(); } catch (error) { ElMessage.error(error.message || "操作失败"); } }
+function search() {
+  pagination.pageNum = 1;
+  return load();
+}
 onMounted(load);
 </script>
 <template>
   <section>
     <div class="page-heading"><h2>财务管理</h2><el-button :loading="loading" @click="load">刷新</el-button></div>
-    <el-tabs v-model="tab" @tab-change="load">
+    <el-tabs v-model="tab" @tab-change="search">
       <el-tab-pane label="退款管理" name="refund" /><el-tab-pane label="评价管理" name="comment" /><el-tab-pane label="账户明细" name="account" /><el-tab-pane label="发票管理" name="invoice" /><el-tab-pane label="贷款服务" name="loan" />
     </el-tabs>
     <el-table :data="rows" v-loading="loading" stripe>
@@ -41,5 +52,7 @@ onMounted(load);
       <template v-else-if="tab === 'invoice'"><el-table-column prop="applyNo" label="申请单号" /><el-table-column prop="orderId" label="订单" /><el-table-column prop="amount" label="金额" /><el-table-column label="状态"><template #default="s">{{ invoiceStatusNames[s.row.status] }}</template></el-table-column><el-table-column label="操作"><template #default="s"><el-button v-if="s.row.status === 0" link type="success" @click="issue(s.row)">开票</el-button><el-button v-if="s.row.status === 0" link type="danger" @click="rejectInvoice(s.row)">驳回</el-button></template></el-table-column></template>
       <template v-else><el-table-column prop="loanNo" label="贷款编号" /><el-table-column prop="amount" label="金额" /><el-table-column label="状态"><template #default="s">{{ loanStatusNames[s.row.status] }}</template></el-table-column><el-table-column label="操作"><template #default="s"><el-button v-if="s.row.status === 0" link type="success" @click="auditLoan(s.row, true)">审核通过</el-button><el-button v-if="s.row.status === 0" link type="danger" @click="auditLoan(s.row, false)">驳回</el-button><el-button v-if="s.row.status === 0" link @click="loanAction(s.row, 'release')">确认放款</el-button><el-button v-if="s.row.status === 1" link @click="loanAction(s.row, 'repay')">确认还款</el-button></template></el-table-column></template>
     </el-table>
+    <ListPagination :pagination="pagination" :disabled="loading" @change="load" />
+
   </section>
 </template>
