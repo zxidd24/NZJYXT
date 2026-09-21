@@ -2,7 +2,12 @@
 import { onMounted, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import request from "../api/request";
+import ListPagination from "../components/ListPagination.vue";
+import { usePagination } from "../composables/usePagination";
 import { useTaskBadge } from "../composables/useTaskBadge";
+
+const { pagination: pendingPagination, fetchPage: fetchPendingPage } = usePagination();
+const { pagination: donePagination, fetchPage: fetchDonePage } = usePagination();
 
 const { fetchPendingCount } = useTaskBadge();
 const active = ref("pending");
@@ -17,8 +22,8 @@ async function load() {
   loading.value = true;
   try {
     const [pendingData, doneData] = await Promise.all([
-      request.get("/api/admin/task/pending"),
-      request.get("/api/admin/task/done"),
+      fetchPendingPage((params) => request.get("/api/admin/task/pending", { params })),
+      fetchDonePage((params) => request.get("/api/admin/task/done", { params })),
     ]);
     pending.value = pendingData.list;
     done.value = doneData.list;
@@ -102,7 +107,9 @@ onMounted(load);
               ></template
             ></el-table-column
           ></el-table
-        ></el-tab-pane
+        >
+        <ListPagination :pagination="pendingPagination" :disabled="loading" @change="load" />
+      </el-tab-pane
       >
       <el-tab-pane label="我的已办" name="done"
         ><el-table :data="done" v-loading="loading" stripe
@@ -129,7 +136,9 @@ onMounted(load);
               ></template
             ></el-table-column
           ></el-table
-        ></el-tab-pane
+        >
+        <ListPagination :pagination="donePagination" :disabled="loading" @change="load" />
+      </el-tab-pane
       >
     </el-tabs>
     <el-dialog

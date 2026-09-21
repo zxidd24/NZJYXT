@@ -2,7 +2,11 @@
 import { onMounted, reactive, ref } from "vue";
 import { ElMessage } from "element-plus";
 import request from "../api/request";
+import ListPagination from "../components/ListPagination.vue";
+import { usePagination } from "../composables/usePagination";
+const { pagination, fetchPage } = usePagination();
 const rows = ref([]);
+const loading = ref(false);
 const roles = ref([]);
 const dialog = reactive({
   visible: false,
@@ -16,15 +20,18 @@ const dialog = reactive({
   roleIds: [],
 });
 async function load() {
+  loading.value = true;
   try {
     const [page, roleList] = await Promise.all([
-      request.get("/api/admin/user"),
+      fetchPage((params) => request.get("/api/admin/user", { params })),
       request.get("/api/admin/role"),
     ]);
     rows.value = page.list;
     roles.value = roleList;
   } catch (error) {
     ElMessage.error(error.message || "账户加载失败");
+  } finally {
+    loading.value = false;
   }
 }
 function add() {
@@ -91,7 +98,7 @@ onMounted(load);
       <h2>后台账户</h2>
       <el-button type="primary" @click="add">新增账户</el-button>
     </div>
-    <el-table :data="rows"
+    <el-table :data="rows" v-loading="loading"
       ><el-table-column prop="username" label="账号" /><el-table-column
         prop="realName"
         label="姓名"
@@ -111,7 +118,9 @@ onMounted(load);
           ></template
         ></el-table-column
       ></el-table
-    ><el-dialog v-model="dialog.visible" title="账户设置" width="480px"
+    >
+    <ListPagination :pagination="pagination" :disabled="loading" @change="load" />
+    <el-dialog v-model="dialog.visible" title="账户设置" width="480px"
       ><el-form label-width="90px"
         ><el-form-item label="登录账号"
           ><el-input v-model="dialog.username" /></el-form-item
