@@ -8,8 +8,10 @@ let timer = null;
 /** 从后端拉取当前登录管理员的待办任务数量 */
 async function fetchPendingCount() {
   try {
-    const data = await request.get("/api/admin/task/pending");
-    pendingCount.value = Array.isArray(data?.list) ? data.list.length : 0;
+    const data = await request.get("/api/admin/task/pending", {
+      params: { pageNum: 1, pageSize: 1 },
+    });
+    pendingCount.value = Number(data?.total ?? 0);
   } catch (_) {
     // 静默失败，避免影响页面正常交互
   }
