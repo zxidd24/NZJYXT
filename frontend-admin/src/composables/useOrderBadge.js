@@ -8,14 +8,20 @@ let timer = null;
 // 需要管理员处理的订单状态：1=待审核、2=待发货、3=待收货
 const HANDLED_STATUS = [1, 2, 3];
 
-/** 从后端拉取订单列表，统计待处理订单数量 */
+/** 按待处理状态汇总分页总数，避免只统计第一页订单 */
 async function fetchPendingOrderCount() {
   try {
-    const data = await request.get("/api/admin/order/page");
-    const list = Array.isArray(data?.list) ? data.list : [];
-    pendingOrderCount.value = list.filter((o) =>
-      HANDLED_STATUS.includes(o.orderStatus),
-    ).length;
+    const pages = await Promise.all(
+      HANDLED_STATUS.map((status) =>
+        request.get("/api/admin/order/page", {
+          params: { pageNum: 1, pageSize: 1, status },
+        }),
+      ),
+    );
+    pendingOrderCount.value = pages.reduce(
+      (total, page) => total + Number(page?.total ?? 0),
+      0,
+    );
   } catch (_) {
     // 静默失败，避免影响页面正常交互
   }
