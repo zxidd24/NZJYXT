@@ -85,6 +85,11 @@ public class FinanceService {
         return new PageResult<>(page.getTotal(), pageNum, pageSize, page.getRecords().stream().map(this::refundView).toList());
     }
 
+    public RefundView refundDetail(Long id) {
+        RefundApply refund = refundMapper.selectById(id);
+        return refund == null ? null : refundView(refund);
+    }
+
     @Transactional
     public void auditRefund(Long adminId, Long refundId, boolean approved, String remark) {
         RefundApply refund = refundMapper.selectById(refundId);
@@ -178,6 +183,11 @@ public class FinanceService {
 
     public LoanInfo loanInfo(Long userId) { PortalUserInfo info = portalInfoMapper.selectById(userId); BigDecimal limit = info == null ? BigDecimal.ZERO : defaultAmount(info.getCreditLimit()); BigDecimal used = loanUsed(userId); return new LoanInfo(limit, used, limit.subtract(used).max(BigDecimal.ZERO), loanPage(userId, 1, 100, null).getList()); }
     public PageResult<LoanRecordView> loanPage(Long userId, int pageNum, int pageSize, Integer status) { IPage<LoanRecord> page = loanMapper.selectPage(new Page<>(pageNum, pageSize), Wrappers.<LoanRecord>lambdaQuery().eq(userId != null, LoanRecord::getUserId, userId).eq(status != null, LoanRecord::getStatus, status).orderByDesc(LoanRecord::getApplyTime)); return new PageResult<>(page.getTotal(), pageNum, pageSize, page.getRecords().stream().map(this::loanView).toList()); }
+
+    public LoanRecordView loanDetail(Long id) {
+        LoanRecord loan = loanMapper.selectById(id);
+        return loan == null ? null : loanView(loan);
+    }
     @Transactional public void auditLoan(Long adminId, Long id, boolean approved, String remark) { LoanRecord loan = loanMapper.selectById(id); if (loan == null || !Objects.equals(loan.getStatus(), 0)) throw business("贷款申请不存在或已处理"); AuditRecord record = pendingAudit(StatusEnums.AuditBizType.LOAN.value, id); if (record == null || !canAudit(adminId, record)) throw new BusinessException(ErrorCodeEnum.FORBIDDEN.getCode(), ErrorCodeEnum.FORBIDDEN.getMessage()); if (!approved && (remark == null || remark.isBlank())) throw business("驳回时必须填写原因"); updateAudit(record.getId(), adminId, approved, remark, LocalDateTime.now()); if (!approved) { loan.setStatus(3); loan.setAuditRemark(trim(remark, 255)); } loan.setAuditTime(LocalDateTime.now()); loan.setAuditorId(adminId); loanMapper.updateById(loan); messageService.send(loan.getUserId(), "LOAN_RESULT", 6, loan.getId(), java.util.Map.of("贷款编号", loan.getLoanNo(), "结果", approved ? "通过" : "驳回", "备注", remark == null ? "" : remark)); }
     @Transactional public void releaseLoan(Long adminId, Long id) { LoanRecord loan = loanMapper.selectById(id); if (loan == null || !Objects.equals(loan.getStatus(), 0)) throw business("贷款申请状态不正确"); AuditRecord record = auditRecordMapper.selectOne(Wrappers.<AuditRecord>lambdaQuery().eq(AuditRecord::getBizType, 6).eq(AuditRecord::getBizId, id).eq(AuditRecord::getStatus, 1).last("LIMIT 1")); if (record == null) throw business("贷款尚未审核通过"); loan.setStatus(1); loan.setReleaseTime(LocalDateTime.now()); loanMapper.updateById(loan); }
     @Transactional public void repayLoan(Long adminId, Long id) { LoanRecord loan = loanMapper.selectById(id); if (loan == null || !Objects.equals(loan.getStatus(), 1)) throw business("贷款尚未放款"); loan.setStatus(2); loan.setRepayTime(LocalDateTime.now()); loanMapper.updateById(loan); }
