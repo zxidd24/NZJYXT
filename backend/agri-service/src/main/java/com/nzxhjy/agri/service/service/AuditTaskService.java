@@ -33,6 +33,7 @@ public class AuditTaskService {
     private final PortalUserManagementService portalUserManagementService;
     private final ProductService productService;
     private final OrderService orderService;
+    private final FinanceService financeService;
 
     public PageResult<TaskView> pending(Long userId, int pageNum, int pageSize) {
         var query = Wrappers.<AuditRecord>lambdaQuery()
@@ -78,7 +79,11 @@ public class AuditTaskService {
                 || record.getBizType() == StatusEnums.AuditBizType.PRODUCT_PRICE_STOCK.value)
                 ? productService.detail(record.getBizId())
                 : record.getBizType() == StatusEnums.AuditBizType.ORDER.value
-                ? orderService.detail(record.getBizId(), record.getApplicantId()) : null;
+                ? orderService.detail(record.getBizId(), record.getApplicantId())
+                : record.getBizType() == StatusEnums.AuditBizType.REFUND.value
+                ? financeService.refundDetail(record.getBizId())
+                : record.getBizType() == StatusEnums.AuditBizType.LOAN.value
+                ? financeService.loanDetail(record.getBizId()) : null;
         return new TaskDetail(toView(record), bizDetail);
     }
 
