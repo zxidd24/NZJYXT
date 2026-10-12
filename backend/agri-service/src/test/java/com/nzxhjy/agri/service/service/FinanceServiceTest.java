@@ -129,6 +129,32 @@ class FinanceServiceTest {
         verify(refundMapper).insert(any(RefundApply.class));
     }
 
+    /** 授信占用口径：申请中(0)与已放款(1)计入，已还款(2)和驳回(3)不计入。 */
+    @Test
+    void loanUsedSumsOnlyActiveLoanOccupancy() {
+        LoanRecord applying = loan("100.00");
+        LoanRecord released = loan("50.00");
+        when(loanMapper.selectList(any())).thenReturn(java.util.List.of(applying, released));
+
+        assertEquals(new BigDecimal("150.00"), service.loanUsed(7L));
+
+        verify(loanMapper).selectList(any());
+    }
+
+    @Test
+    void loanUsedIsZeroWhenNoActiveLoan() {
+        when(loanMapper.selectList(any())).thenReturn(java.util.List.of());
+
+        assertEquals(BigDecimal.ZERO, service.loanUsed(7L));
+    }
+
+    private LoanRecord loan(String creditLimitUsed) {
+        LoanRecord record = new LoanRecord();
+        record.setUserId(7L);
+        record.setCreditLimitUsed(new BigDecimal(creditLimitUsed));
+        return record;
+    }
+
     private WalletAccount wallet(Long userId, String balance) {
         WalletAccount account = new WalletAccount();
         account.setId(1L);

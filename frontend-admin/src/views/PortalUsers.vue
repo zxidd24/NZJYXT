@@ -30,7 +30,7 @@ async function load() {
 function openCredit(row) {
   dialog.row = row;
   dialog.grade = row.creditGrade || "C";
-  dialog.limit = 0;
+  dialog.limit = Number(row.creditLimit ?? 0);
   dialog.visible = true;
 }
 async function saveCredit() {
@@ -120,6 +120,9 @@ onMounted(load);
         label="商家等级"
         width="100"
       />
+      <el-table-column prop="creditLimit" label="授信额度" width="120">
+        <template #default="scope">¥{{ scope.row.creditLimit ?? 0 }}</template>
+      </el-table-column>
       <el-table-column prop="authStatus" label="认证状态" width="100">
         <template #default="scope">{{
           ["未认证", "审核中", "已认证", "已驳回"][scope.row.authStatus]

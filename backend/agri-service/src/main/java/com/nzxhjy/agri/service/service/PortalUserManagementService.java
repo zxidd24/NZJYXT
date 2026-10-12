@@ -36,6 +36,7 @@ public class PortalUserManagementService {
     private final PortalOrderStatsMapper orderStatsMapper;
     private final SysOperLogMapper operLogMapper;
     private final AesUtils aesUtils;
+    private final FinanceService financeService;
 
     public PageResult<PortalUserListItem> page(int pageNum, int pageSize, Integer userType, String creditGrade) {
         List<Long> gradeUserIds = null;
@@ -85,6 +86,12 @@ public class PortalUserManagementService {
         if (creditLimit == null || creditLimit.signum() < 0) {
             throw new BusinessException(ErrorCodeEnum.INVALID_PARAM.getCode(), "授信额度不能小于0");
         }
+        // 已放款/申请中的贷款占用了授信额度，额度不得下调到占用额以下，避免出现超额占用。
+        BigDecimal used = financeService.loanUsed(userId);
+        if (creditLimit.compareTo(used) < 0) {
+            throw new BusinessException(ErrorCodeEnum.BUSINESS_ERROR.getCode(),
+                    "授信额度不能低于已占用额度" + used.toPlainString() + "元");
+        }
         String beforeGrade = info.getCreditGrade();
         BigDecimal beforeLimit = defaultAmount(info.getCreditLimit());
         info.setCreditGrade(normalizedGrade);
@@ -106,7 +113,8 @@ public class PortalUserManagementService {
         return new PortalUserListItem(user.getId(), displayName(user, info), user.getUserType(),
                 info == null ? null : info.getContactName(), user.getPhone(),
                 info == null ? null : info.getCreditGrade(), info == null ? 0 : defaultStatus(info.getAuthStatus()),
-                user.getStatus(), user.getCreatedAt());
+                user.getStatus(), user.getCreatedAt(),
+                info == null ? BigDecimal.ZERO : defaultAmount(info.getCreditLimit()));
     }
 
     private String displayName(SysUser user, PortalUserInfo info) {
@@ -156,6 +164,8 @@ public class PortalUserManagementService {
         private Integer authStatus;
         private Integer status;
         private java.time.LocalDateTime createdAt;
+        /** 授信额度，供评级弹窗回填，避免管理员保存时被重置为0。 */
+        private BigDecimal creditLimit;
     }
 
     @Data
