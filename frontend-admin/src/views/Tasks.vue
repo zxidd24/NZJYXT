@@ -22,6 +22,27 @@ const payMethodNames = { WALLET: "钱包", BANK_TRANSFER: "银行转账", CREDIT
 const refundStatusNames = ["待审核", "已通过", "已驳回", "已退款"];
 const loanStatusNames = ["申请中", "已放款", "已还款", "已驳回"];
 const auditStatusNames = ["待处理", "通过", "驳回"];
+const bizTypeNames = { 1: "实名认证", 2: "商品上架", 3: "商品量价修改", 4: "订单", 5: "退款", 6: "贷款" };
+
+// 各业务类型的审核接口与请求体：退款/贷款复用财务模块接口，
+// 参数取 bizId（退款单ID / 贷款ID），与任务接口的 recordId 语义不同。
+function auditTarget(row) {
+  switch (row.bizType) {
+    case 1:
+      return { url: "/api/admin/task/audit-auth", body: { recordId: row.id } };
+    case 2:
+    case 3:
+      return { url: "/api/admin/task/audit-product", body: { recordId: row.id } };
+    case 4:
+      return { url: "/api/admin/task/audit-order", body: { recordId: row.id } };
+    case 5:
+      return { url: "/api/admin/refund/audit", body: { id: row.bizId } };
+    case 6:
+      return { url: `/api/admin/loan/${row.bizId}/audit`, body: {} };
+    default:
+      return null;
+  }
+}
 
 async function load() {
   loading.value = true;
@@ -39,9 +60,14 @@ async function load() {
   }
 }
 async function audit(row, approved) {
+  const target = auditTarget(row);
+  if (!target) {
+    ElMessage.error("暂不支持该类型的审核任务");
+    return;
+  }
   const remark = approved
     ? ""
-    : await ElMessageBox.prompt("请输入驳回原因", "审核实名认证", {
+    : await ElMessageBox.prompt("请输入驳回原因", "审核" + (bizTypeNames[row.bizType] || "任务"), {
         inputPattern: /\S+/,
         inputErrorMessage: "驳回原因不能为空",
       })
@@ -49,12 +75,7 @@ async function audit(row, approved) {
         .catch(() => null);
   if (!approved && remark === null) return;
   try {
-    const endpoint = row.bizType === 1 ? "/api/admin/task/audit-auth" : row.bizType === 4 ? "/api/admin/task/audit-order" : "/api/admin/task/audit-product";
-    await request.post(endpoint, {
-      recordId: row.id,
-      approved,
-      remark,
-    });
+    await request.post(target.url, { ...target.body, approved, remark });
     ElMessage.success("审核完成");
     await load();
     // 审核完成后立即刷新侧边栏待办红点/数字
