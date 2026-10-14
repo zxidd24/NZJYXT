@@ -26,6 +26,13 @@ public class AdminOrderController {
     @GetMapping("/{id}/attachments") public Result<List<OrderAttachment>> attachments(@PathVariable Long id) { return Result.success(orderService.attachments(UserContext.getUserId(), id, true)); }
     @PutMapping("/delivery") public Result<Void> delivery(@Valid @RequestBody DeliveryRequest r) { orderService.delivery(UserContext.getUserId(), r.orderId, r.company, r.trackingNo, r.fileUrl, r.fileName); return Result.success(); }
     @PutMapping("/confirm") public Result<Void> confirm(@Valid @RequestBody IdRequest r) { orderService.confirm(UserContext.getUserId(), r.orderId); return Result.success(); }
+    /**
+     * 确认银行转账到账（一期由财务人工确认）。
+     *
+     * <p>二期接入中行后，到账由「到账通知回调」验签后调用同一服务方法，
+     * 本接口可保留作为人工兜底或直接下线。</p>
+     */
+    @PutMapping("/confirm-payment") public Result<OrderService.PayResult> confirmPayment(@Valid @RequestBody IdRequest r) { return Result.success(orderService.confirmBankTransferReceived(r.orderId)); }
     @Data public static class DeliveryRequest { @NotNull private Long orderId; @NotBlank private String company; @NotBlank private String trackingNo; @Size(max=255) private String fileUrl; @Size(max=100) private String fileName; }
     @Data public static class IdRequest { @NotNull private Long orderId; }
 }

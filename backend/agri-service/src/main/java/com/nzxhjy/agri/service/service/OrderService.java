@@ -10,6 +10,9 @@ import com.nzxhjy.agri.common.model.PageResult;
 import com.nzxhjy.agri.common.redis.RedisUtils;
 import com.nzxhjy.agri.service.entity.*;
 import com.nzxhjy.agri.service.mapper.*;
+import com.nzxhjy.agri.service.pay.PayOutcome;
+import com.nzxhjy.agri.service.pay.PayService;
+import com.nzxhjy.agri.service.pay.SettlementAccount;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.RequiredArgsConstructor;
@@ -44,8 +47,27 @@ public class OrderService {
     private final AuditRecordMapper auditRecordMapper;
     private final MessageService messageService;
     private final AccessControlService accessControlService;
+    /** 支付方式实现，按 {@link PayService#method()} 分发，见《开发手册2.md》第十四章。 */
+    private final List<PayService> payServices;
 
     private static final DateTimeFormatter NO_FORMAT = DateTimeFormatter.ofPattern("yyyyMMddHHmmssSSS");
+
+    /**
+     * 按支付方式取资金动作实现。未知方式直接拒绝，避免新增支付方式时被静默放行。
+     */
+    private PayService requirePayService(String method) {
+        return payServices.stream().filter(service -> service.method().equals(method)).findFirst()
+                .orElseThrow(() -> business("支付方式不支持"));
+    }
+
+    private PayResult payResult(OrderMain order, String message) {
+        return payResult(order, message, false, null);
+    }
+
+    private PayResult payResult(OrderMain order, String message, boolean awaitingPayment, SettlementAccount settlementAccount) {
+        return new PayResult(true, order.getOrderStatus(), order.getPayStatus(), order.getPayMethod(), message,
+                awaitingPayment, settlementAccount);
+    }
 
     public List<CartView> cartList(Long userId) {
         return cartMapper.selectList(Wrappers.<ShoppingCart>lambdaQuery().eq(ShoppingCart::getUserId, userId)
@@ -119,13 +141,43 @@ public class OrderService {
     public PayResult pay(Long userId, String orderNo, String payMethod) {
         OrderMain order = orderMapper.selectOwnedByNoForUpdate(orderNo, userId);
         if (order == null) throw business("订单不存在");
-        if (Integer.valueOf(StatusEnums.PayStatus.PAID.value).equals(order.getPayStatus())) return new PayResult(true, order.getOrderStatus(), "订单已支付");
+        if (Integer.valueOf(StatusEnums.PayStatus.PAID.value).equals(order.getPayStatus())) return payResult(order, "订单已支付");
         if (!Integer.valueOf(StatusEnums.OrderStatus.PENDING_PAYMENT.value).equals(order.getOrderStatus())) throw business("当前订单不可支付");
-        String method = payMethod == null ? "WALLET" : payMethod.toUpperCase(Locale.ROOT);
-        if (!Set.of("WALLET", "BANK_TRANSFER", "CREDIT").contains(method)) throw business("支付方式不支持");
-        if ("WALLET".equals(method)) payFromWallet(userId, order);
-        order.setPayMethod(method); order.setPayStatus(StatusEnums.PayStatus.PAID.value); order.setPayTime(LocalDateTime.now()); order.setOrderStatus(StatusEnums.OrderStatus.PENDING_AUDIT.value); orderMapper.updateById(order);
-        createOrderAudit(order); return new PayResult(true, order.getOrderStatus(), "支付成功");
+        String method = payMethod == null ? StatusEnums.PayMethod.WALLET.name() : payMethod.toUpperCase(Locale.ROOT);
+        PayService payService = requirePayService(method);
+        PayOutcome outcome = payService.pay(userId, order);
+        if (outcome == PayOutcome.PENDING) {
+            // 已发起、等待外部到账确认：只登记支付方式，订单保持待付款。
+            order.setPayMethod(method); orderMapper.updateById(order);
+            return payResult(order, "请向平台结算账户完成转账，到账确认后订单生效", true, payService.settlementAccount());
+        }
+        markPaidAndStartAudit(order, method);
+        return payResult(order, "支付成功");
+    }
+
+    /**
+     * 确认线下到账（一期由财务人工确认，二期由银行到账回调驱动并复用本方法）。
+     *
+     * <p>仅接受「需等待外部到账确认」的支付方式；幂等，重复确认不会重复建审核任务。</p>
+     */
+    @Transactional
+    public PayResult confirmBankTransferReceived(Long orderId) {
+        OrderMain order = orderMapper.selectById(orderId);
+        if (order == null) throw business("订单不存在");
+        if (Integer.valueOf(StatusEnums.PayStatus.PAID.value).equals(order.getPayStatus())) return payResult(order, "订单已支付");
+        if (!Integer.valueOf(StatusEnums.OrderStatus.PENDING_PAYMENT.value).equals(order.getOrderStatus())) throw business("当前订单不可确认到账");
+        PayService payService = order.getPayMethod() == null ? null : payServices.stream()
+                .filter(service -> service.method().equalsIgnoreCase(order.getPayMethod())).findFirst().orElse(null);
+        if (payService == null || !payService.awaitsExternalConfirmation()) throw business("该订单无需确认到账");
+        markPaidAndStartAudit(order, payService.method());
+        return payResult(order, "到账已确认，订单进入审核");
+    }
+
+    private void markPaidAndStartAudit(OrderMain order, String method) {
+        order.setPayMethod(method); order.setPayStatus(StatusEnums.PayStatus.PAID.value);
+        order.setPayTime(LocalDateTime.now()); order.setOrderStatus(StatusEnums.OrderStatus.PENDING_AUDIT.value);
+        orderMapper.updateById(order);
+        createOrderAudit(order);
     }
 
     public PageResult<OrderView> page(Long userId, int pageNum, int pageSize, Integer status) {
@@ -192,32 +244,22 @@ public class OrderService {
 
     @Transactional
     public void cancelExpired() {
-        List<OrderMain> expired = orderMapper.selectList(Wrappers.<OrderMain>lambdaQuery()
+        // 等待外部到账确认的订单（如银行转账）不参与超时取消：
+        // 买家可能已汇款，自动取消会造成"款已汇、单已取消"且库存被错误回补。
+        List<String> awaitingMethods = payServices.stream()
+                .filter(PayService::awaitsExternalConfirmation).map(PayService::method).toList();
+        var query = Wrappers.<OrderMain>lambdaQuery()
                 .eq(OrderMain::getOrderStatus, StatusEnums.OrderStatus.PENDING_PAYMENT.value)
-                .lt(OrderMain::getCreatedAt, LocalDateTime.now().minusMinutes(30))
-                .last("LIMIT 100"));
+                .lt(OrderMain::getCreatedAt, LocalDateTime.now().minusMinutes(30));
+        if (!awaitingMethods.isEmpty()) {
+            query.and(w -> w.isNull(OrderMain::getPayMethod).or().notIn(OrderMain::getPayMethod, awaitingMethods));
+        }
+        List<OrderMain> expired = orderMapper.selectList(query.last("LIMIT 100"));
         for (OrderMain order : expired) {
             cancelAndRestore(order);
         }
     }
 
-    private void payFromWallet(Long userId, OrderMain order) {
-        WalletAccount account = walletMapper.selectByUserIdForUpdate(userId);
-        if (account == null || account.getBalance() == null || account.getBalance().compareTo(order.getPayAmount()) < 0) {
-            throw business("钱包余额不足");
-        }
-        int updated = walletMapper.update(null, Wrappers.<WalletAccount>lambdaUpdate()
-                .eq(WalletAccount::getId, account.getId())
-                .ge(WalletAccount::getBalance, order.getPayAmount())
-                .setSql("balance = balance - " + order.getPayAmount().toPlainString()));
-        if (updated == 0) throw business("钱包余额不足");
-        BigDecimal after = account.getBalance().subtract(order.getPayAmount());
-        WalletTransaction tx = new WalletTransaction();
-        tx.setUserId(userId); tx.setOrderId(order.getId()); tx.setTransNo(generateNo("T"));
-        tx.setAmount(order.getPayAmount()); tx.setDirection(2); tx.setTransType(3);
-        tx.setTransStatus(1); tx.setBalanceAfter(after); tx.setRemark("订单支付");
-        transactionMapper.insert(tx);
-    }
     private void createOrderAudit(OrderMain order) { AuditFlow flow = auditFlowMapper.selectOne(Wrappers.<AuditFlow>lambdaQuery().eq(AuditFlow::getBizType, 4).eq(AuditFlow::getEnabled, 1)); AuditNode node = flow == null ? null : auditNodeMapper.selectOne(Wrappers.<AuditNode>lambdaQuery().eq(AuditNode::getFlowId, flow.getId()).orderByAsc(AuditNode::getNodeOrder).last("LIMIT 1")); if (node == null) throw business("订单审核流程未配置"); AuditRecord r = new AuditRecord(); r.setBizType(4); r.setBizId(order.getId()); r.setBizNo(order.getOrderNo()); r.setBizSummary("订单审核：" + order.getOrderNo()); r.setFlowNodeId(node.getId()); r.setNodeName(node.getNodeName()); r.setStatus(0); r.setApplicantId(order.getUserId()); r.setApplyTime(LocalDateTime.now()); auditRecordMapper.insert(r); order.setAuditNodeId(node.getId()); orderMapper.updateById(order); messageService.sendTodo(node.getId(), 4, order.getId()); }
     private boolean cancelAndRestore(OrderMain order) {
         if (order == null || (!Integer.valueOf(StatusEnums.OrderStatus.PENDING_PAYMENT.value).equals(order.getOrderStatus())
@@ -321,5 +363,15 @@ public class OrderService {
     @Data @AllArgsConstructor public static class CartView { private Long productId; private String productName; private BigDecimal price; private Integer quantity; private Integer selected; private Integer stock; private String images; }
     @Data @AllArgsConstructor public static class DetailView { private Long productId; private String productName; private Long categoryId; private String categoryName; private BigDecimal productPrice; private Integer quantity; private BigDecimal totalPrice; private String unit; }
     @Data @AllArgsConstructor public static class OrderView { private Long id; private String orderNo; private BigDecimal totalAmount; private BigDecimal payAmount; private Integer orderStatus; private Integer payStatus; private String payMethod; private String receiverName; private String receiverPhone; private String receiverAddress; private String sellerNote; private List<DetailView> details; }
-    @Data @AllArgsConstructor public static class PayResult { private boolean success; private int orderStatus; private String message; }
+    @Data @AllArgsConstructor public static class PayResult {
+        private boolean success;
+        private int orderStatus;
+        private Integer payStatus;
+        private String payMethod;
+        private String message;
+        /** true 表示已发起支付、等待外部到账确认，订单仍为待付款。 */
+        private boolean awaitingPayment;
+        /** 线下打款目标账户，仅银行转账等需买家主动汇款的支付方式返回。 */
+        private SettlementAccount settlementAccount;
+    }
 }

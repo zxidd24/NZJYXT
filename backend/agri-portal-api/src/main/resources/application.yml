@@ -38,3 +38,9 @@ agri:
   order-timeout:
     enabled: ${ORDER_TIMEOUT_ENABLED:false}
     fixed-delay-ms: ${ORDER_TIMEOUT_FIXED_DELAY_MS:60000}
+  pay:
+    bank:
+      # 平台结算账户，用于银行转账时向买家展示打款目标账户；二期接中行后可改为接口获取。
+      payee-name: ${BANK_PAYEE_NAME:农资现货交易平台}
+      bank-name: ${BANK_NAME:中国银行}
+      account-no: ${BANK_ACCOUNT_NO:}
