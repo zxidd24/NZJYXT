@@ -18,11 +18,13 @@ import com.nzxhjy.agri.service.entity.AuditNode;
 import com.nzxhjy.agri.service.entity.WalletAccount;
 import com.nzxhjy.agri.service.entity.WalletTransaction;
 import com.nzxhjy.agri.service.mapper.*;
+import com.nzxhjy.agri.service.pay.CreditPayService;
+import com.nzxhjy.agri.service.pay.MockBankTransferPayService;
+import com.nzxhjy.agri.service.pay.WalletPayService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.aop.framework.ProxyFactory;
@@ -40,7 +42,9 @@ import java.time.Duration;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
@@ -64,7 +68,20 @@ class OrderServiceTest {
     @Mock AuditRecordMapper auditRecordMapper;
     @Mock MessageService messageService;
     @Mock AccessControlService accessControlService;
-    @InjectMocks OrderService service;
+    OrderService service;
+
+    @org.junit.jupiter.api.BeforeEach
+    void setUp() {
+        // MyBatis-Plus 的 lambda 条件需要实体元数据；单元测试无 Spring 上下文，手动初始化。
+        TableInfoHelper.initTableInfo(new MapperBuilderAssistant(new MybatisConfiguration(), ""), OrderMain.class);
+        // 支付方式实现按真实对象装配，覆盖钱包支付的扣款、流水与并发保护逻辑。
+        service = new OrderService(cartMapper, orderMapper, detailMapper, attachmentMapper, productMapper,
+                categoryMapper, addressMapper, userInfoMapper, walletMapper, transactionMapper, redisUtils,
+                auditFlowMapper, auditNodeMapper, auditRecordMapper, messageService, accessControlService,
+                List.of(new WalletPayService(walletMapper, transactionMapper),
+                        new MockBankTransferPayService("农资现货交易平台", "中国银行", "6217000000000000"),
+                        new CreditPayService()));
+    }
 
     @Test
     void orderTokenIsStoredForTenMinutes() {
@@ -96,6 +113,142 @@ class OrderServiceTest {
         assertEquals("订单已支付", result.getMessage());
         verify(orderMapper, never()).updateById(any(OrderMain.class));
         verifyNoInteractions(walletMapper, transactionMapper, auditRecordMapper);
+    }
+
+    /** P3：额度支付一期未开放，必须拒绝，不得静默放行成免费订单。 */
+    @Test
+    void creditPaymentIsRejectedAndOrderStaysUnpaid() {
+        OrderMain order = order(11L, 7L, StatusEnums.OrderStatus.PENDING_PAYMENT.value,
+                StatusEnums.PayStatus.UNPAID.value);
+        when(orderMapper.selectOwnedByNoForUpdate(order.getOrderNo(), 7L)).thenReturn(order);
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> service.pay(7L, order.getOrderNo(), "CREDIT"));
+
+        assertEquals("额度支付暂未开放，请选择其他支付方式", exception.getMessage());
+        // 关键：订单未被标记支付，未创建审核任务，也未产生任何资金动作。
+        assertEquals(StatusEnums.PayStatus.UNPAID.value, order.getPayStatus());
+        assertEquals(StatusEnums.OrderStatus.PENDING_PAYMENT.value, order.getOrderStatus());
+        assertNull(order.getPayMethod());
+        verify(orderMapper, never()).updateById(any(OrderMain.class));
+        verifyNoInteractions(walletMapper, transactionMapper, auditRecordMapper);
+    }
+
+    @Test
+    void creditPaymentIsRejectedCaseInsensitively() {
+        OrderMain order = order(11L, 7L, StatusEnums.OrderStatus.PENDING_PAYMENT.value,
+                StatusEnums.PayStatus.UNPAID.value);
+        when(orderMapper.selectOwnedByNoForUpdate(order.getOrderNo(), 7L)).thenReturn(order);
+
+        assertThrows(BusinessException.class, () -> service.pay(7L, order.getOrderNo(), "credit"));
+        assertEquals(StatusEnums.PayStatus.UNPAID.value, order.getPayStatus());
+    }
+
+    /** 未知支付方式仍应被拒绝（保留原有防护）。 */
+    @Test
+    void unknownPayMethodIsRejected() {
+        OrderMain order = order(11L, 7L, StatusEnums.OrderStatus.PENDING_PAYMENT.value,
+                StatusEnums.PayStatus.UNPAID.value);
+        when(orderMapper.selectOwnedByNoForUpdate(order.getOrderNo(), 7L)).thenReturn(order);
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> service.pay(7L, order.getOrderNo(), "ALIPAY"));
+
+        assertEquals("支付方式不支持", exception.getMessage());
+        assertEquals(StatusEnums.PayStatus.UNPAID.value, order.getPayStatus());
+        verifyNoInteractions(walletMapper, transactionMapper);
+    }
+
+    /** P4：银行转账未经到账确认不得标记支付成功，订单应保持待付款并返回打款账户。 */
+    @Test
+    void bankTransferWaitsForConfirmationAndStaysUnpaid() {
+        OrderMain order = order(11L, 7L, StatusEnums.OrderStatus.PENDING_PAYMENT.value,
+                StatusEnums.PayStatus.UNPAID.value);
+        when(orderMapper.selectOwnedByNoForUpdate(order.getOrderNo(), 7L)).thenReturn(order);
+
+        OrderService.PayResult result = service.pay(7L, order.getOrderNo(), "BANK_TRANSFER");
+
+        assertEquals(true, result.isSuccess());
+        assertEquals(true, result.isAwaitingPayment());
+        assertEquals(StatusEnums.PayStatus.UNPAID.value, order.getPayStatus());
+        assertEquals(StatusEnums.OrderStatus.PENDING_PAYMENT.value, order.getOrderStatus());
+        assertEquals("BANK_TRANSFER", order.getPayMethod());
+        // 返回平台结算账户供买家线下打款
+        assertEquals("中国银行", result.getSettlementAccount().bankName());
+        assertEquals("6217000000000000", result.getSettlementAccount().accountNo());
+        // 未经确认不得创建审核任务、不得产生资金动作
+        verifyNoInteractions(walletMapper, transactionMapper, auditRecordMapper);
+    }
+
+    /** 确认到账后才流转订单并创建审核任务。 */
+    @Test
+    void confirmingBankTransferMovesOrderIntoAudit() {
+        OrderMain order = order(11L, 7L, StatusEnums.OrderStatus.PENDING_PAYMENT.value,
+                StatusEnums.PayStatus.UNPAID.value);
+        order.setPayMethod("BANK_TRANSFER");
+        when(orderMapper.selectById(11L)).thenReturn(order);
+        AuditFlow flow = new AuditFlow();
+        flow.setId(4L);
+        when(auditFlowMapper.selectOne(any())).thenReturn(flow);
+        AuditNode node = new AuditNode();
+        node.setId(5L);
+        when(auditNodeMapper.selectOne(any())).thenReturn(node);
+
+        OrderService.PayResult result = service.confirmBankTransferReceived(11L);
+
+        assertEquals(StatusEnums.PayStatus.PAID.value, order.getPayStatus());
+        assertEquals(StatusEnums.OrderStatus.PENDING_AUDIT.value, order.getOrderStatus());
+        assertEquals("到账已确认，订单进入审核", result.getMessage());
+        verify(auditRecordMapper).insert(any(AuditRecord.class));
+        verifyNoInteractions(walletMapper, transactionMapper);
+    }
+
+    /** 确认到账幂等：已支付订单重复确认不再建审核任务。 */
+    @Test
+    void confirmingBankTransferIsIdempotent() {
+        OrderMain order = order(11L, 7L, StatusEnums.OrderStatus.PENDING_AUDIT.value,
+                StatusEnums.PayStatus.PAID.value);
+        order.setPayMethod("BANK_TRANSFER");
+        when(orderMapper.selectById(11L)).thenReturn(order);
+
+        OrderService.PayResult result = service.confirmBankTransferReceived(11L);
+
+        assertEquals("订单已支付", result.getMessage());
+        verify(orderMapper, never()).updateById(any(OrderMain.class));
+        verifyNoInteractions(auditRecordMapper);
+    }
+
+    /** 钱包支付订单不适用"确认到账"，应拒绝。 */
+    @Test
+    void confirmingReceivedRejectsWalletOrder() {
+        OrderMain order = order(11L, 7L, StatusEnums.OrderStatus.PENDING_PAYMENT.value,
+                StatusEnums.PayStatus.UNPAID.value);
+        order.setPayMethod("WALLET");
+        when(orderMapper.selectById(11L)).thenReturn(order);
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> service.confirmBankTransferReceived(11L));
+
+        assertEquals("该订单无需确认到账", exception.getMessage());
+    }
+
+    /** 等待到账确认的订单不得被超时任务自动取消，避免"款已汇、单已取消"。 */
+    @Test
+    void cancelExpiredSkipsOrdersAwaitingExternalConfirmation() {
+        when(orderMapper.selectList(any())).thenReturn(List.of());
+
+        service.cancelExpired();
+
+        org.mockito.ArgumentCaptor<com.baomidou.mybatisplus.core.conditions.AbstractWrapper<OrderMain, ?, ?>> captor =
+                org.mockito.ArgumentCaptor.forClass(com.baomidou.mybatisplus.core.conditions.AbstractWrapper.class);
+        verify(orderMapper).selectList(captor.capture());
+        com.baomidou.mybatisplus.core.conditions.AbstractWrapper<OrderMain, ?, ?> wrapper = captor.getValue();
+        String sql = String.valueOf(wrapper.getTargetSql());
+        assertTrue(sql.contains("pay_method IS NULL OR pay_method NOT IN"),
+                "超时取消应排除等待到账的支付方式，实际SQL=" + sql);
+        // 绑定的排除值即"等待外部到账确认"的支付方式集合
+        assertTrue(String.valueOf(wrapper.getParamNameValuePairs()).contains("BANK_TRANSFER"),
+                "排除集合应含 BANK_TRANSFER，实际参数=" + wrapper.getParamNameValuePairs());
     }
 
     @Test
