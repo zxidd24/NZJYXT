@@ -190,6 +190,7 @@ class FinanceServiceTest {
         verify(refundMapper).insert(any(RefundApply.class));
     }
 
+feature/zzx_1104
     private OrderMain paidOrder(Long id, String payAmount) {
         OrderMain order = new OrderMain();
         order.setId(id);
@@ -200,6 +201,7 @@ class FinanceServiceTest {
         return order;
     }
 
+main
     /** 授信占用口径：申请中(0)与已放款(1)计入，已还款(2)和驳回(3)不计入。 */
     @Test
     void loanUsedSumsOnlyActiveLoanOccupancy() {
@@ -219,6 +221,7 @@ class FinanceServiceTest {
         assertEquals(BigDecimal.ZERO, service.loanUsed(7L));
     }
 
+feature/zzx_1104
     /** P15：放款必须有权限门槛，任意 adminId 不能直接放款。 */
     @Test
     void releaseLoanRejectsOperatorWithoutNodeRole() {
@@ -377,6 +380,7 @@ class FinanceServiceTest {
         return page;
     }
 
+main
     private LoanRecord loan(String creditLimitUsed) {
         LoanRecord record = new LoanRecord();
         record.setUserId(7L);
