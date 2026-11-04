@@ -1,6 +1,9 @@
 package com.nzxhjy.agri.service.service;
 
+import com.baomidou.mybatisplus.core.MybatisConfiguration;
+import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import com.nzxhjy.agri.common.enums.ErrorCodeEnum;
+import com.nzxhjy.agri.common.enums.StatusEnums;
 import com.nzxhjy.agri.common.exception.BusinessException;
 import com.nzxhjy.agri.common.security.AesUtils;
 import com.nzxhjy.agri.service.entity.OrderMain;
@@ -10,9 +13,14 @@ import com.nzxhjy.agri.service.entity.RefundApply;
 import com.nzxhjy.agri.service.entity.WalletAccount;
 import com.nzxhjy.agri.service.entity.AuditFlow;
 import com.nzxhjy.agri.service.entity.AuditNode;
+import com.nzxhjy.agri.service.entity.AuditRecord;
+import com.nzxhjy.agri.service.entity.SysOperLog;
+import com.nzxhjy.agri.service.entity.WalletTransaction;
 import com.nzxhjy.agri.service.mapper.*;
+import org.apache.ibatis.builder.MapperBuilderAssistant;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -44,7 +52,16 @@ class FinanceServiceTest {
     @Mock MessageService messageService;
     @Mock AccessControlService accessControlService;
     @Mock AesUtils aesUtils;
+    @Mock SysOperLogMapper operLogMapper;
     @InjectMocks FinanceService service;
+
+    @org.junit.jupiter.api.BeforeEach
+    void initTableInfo() {
+        // MyBatis-Plus 的 lambda 条件需要实体元数据；单元测试无 Spring 上下文，手动初始化。
+        TableInfoHelper.initTableInfo(
+                new MapperBuilderAssistant(new MybatisConfiguration(), ""),
+                com.nzxhjy.agri.service.entity.WalletTransaction.class);
+    }
 
     @Test
     void depositUpdatesBalanceAndWritesTransaction() {
@@ -123,12 +140,68 @@ class FinanceServiceTest {
         when(auditNodeMapper.selectOne(any())).thenReturn(node);
 
         FinanceService.RefundView view = service.applyRefund(7L, 9L,
-                new BigDecimal("3.00"), "已完成订单退款");
+                new BigDecimal("20.00"), "已完成订单退款");
 
-        assertEquals(new BigDecimal("3.00"), view.getRefundAmount());
+        assertEquals(new BigDecimal("20.00"), view.getRefundAmount());
         verify(refundMapper).insert(any(RefundApply.class));
     }
 
+    /** P6：一期只做整单退款，部分金额必须拒绝，否则会退一点钱却整单退款+全额回补库存。 */
+    @Test
+    void partialRefundIsRejected() {
+        OrderMain order = paidOrder(10L, "10.00");
+        when(orderMapper.selectById(10L)).thenReturn(order);
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> service.applyRefund(7L, 10L, new BigDecimal("3.00"), "部分退款"));
+
+        assertEquals(ErrorCodeEnum.BUSINESS_ERROR.getCode(), exception.getCode());
+        assertEquals("退款金额必须等于订单实付金额10.00元", exception.getMessage());
+        verify(refundMapper, never()).insert(any(RefundApply.class));
+        verify(orderMapper, never()).updateById(any(OrderMain.class));
+    }
+
+    /** P6：0.01 元这类极小金额同样不能通过。 */
+    @Test
+    void tinyRefundAmountIsRejected() {
+        when(orderMapper.selectById(11L)).thenReturn(paidOrder(11L, "10.00"));
+
+        assertThrows(BusinessException.class,
+                () -> service.applyRefund(7L, 11L, new BigDecimal("0.01"), "退一分"));
+
+        verify(refundMapper, never()).insert(any(RefundApply.class));
+    }
+
+    /** P6：等于实付金额的整单退款正常通过。 */
+    @Test
+    void exactAmountRefundIsAccepted() {
+        when(orderMapper.selectById(12L)).thenReturn(paidOrder(12L, "10.00"));
+        when(refundMapper.selectCount(any())).thenReturn(0L);
+        AuditFlow flow = new AuditFlow();
+        flow.setId(5L);
+        AuditNode node = new AuditNode();
+        node.setId(6L);
+        when(auditFlowMapper.selectOne(any())).thenReturn(flow);
+        when(auditNodeMapper.selectOne(any())).thenReturn(node);
+
+        FinanceService.RefundView view = service.applyRefund(7L, 12L, new BigDecimal("10.00"), "整单退款");
+
+        assertEquals(new BigDecimal("10.00"), view.getRefundAmount());
+        verify(refundMapper).insert(any(RefundApply.class));
+    }
+
+feature/zzx_1104
+    private OrderMain paidOrder(Long id, String payAmount) {
+        OrderMain order = new OrderMain();
+        order.setId(id);
+        order.setUserId(7L);
+        order.setPayStatus(1);
+        order.setOrderStatus(1);
+        order.setPayAmount(new BigDecimal(payAmount));
+        return order;
+    }
+
+main
     /** 授信占用口径：申请中(0)与已放款(1)计入，已还款(2)和驳回(3)不计入。 */
     @Test
     void loanUsedSumsOnlyActiveLoanOccupancy() {
@@ -148,6 +221,166 @@ class FinanceServiceTest {
         assertEquals(BigDecimal.ZERO, service.loanUsed(7L));
     }
 
+feature/zzx_1104
+    /** P15：放款必须有权限门槛，任意 adminId 不能直接放款。 */
+    @Test
+    void releaseLoanRejectsOperatorWithoutNodeRole() {
+        when(loanMapper.selectById(13L)).thenReturn(approvedLoan(13L));
+        stubApprovedAuditRecord();
+        when(accessControlService.isSuperAdmin(999L)).thenReturn(false);
+        when(accessControlService.roleIds(999L)).thenReturn(java.util.List.of(3L));
+        when(auditNodeMapper.selectById(any())).thenReturn(loanNode(2L));
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> service.releaseLoan(999L, 13L));
+
+        assertEquals(ErrorCodeEnum.FORBIDDEN.getCode(), exception.getCode());
+        verify(loanMapper, never()).updateById(any(LoanRecord.class));
+        verifyNoInteractions(transactionMapper, operLogMapper);
+    }
+
+    /** P15：还款同样要有权限门槛。 */
+    @Test
+    void repayLoanRejectsOperatorWithoutNodeRole() {
+        when(loanMapper.selectById(14L)).thenReturn(releasedLoan(14L));
+        stubApprovedAuditRecord();
+        when(accessControlService.isSuperAdmin(999L)).thenReturn(false);
+        when(accessControlService.roleIds(999L)).thenReturn(java.util.List.of(3L));
+        when(auditNodeMapper.selectById(any())).thenReturn(loanNode(2L));
+
+        assertThrows(BusinessException.class, () -> service.repayLoan(999L, 14L));
+
+        verify(loanMapper, never()).updateById(any(LoanRecord.class));
+    }
+
+    /** P15/P20：持有贷款审核节点的角色可放款，并写入记账流水与操作日志。 */
+    @Test
+    void releaseLoanByAuthorizedOperatorWritesTransactionAndLog() {
+        LoanRecord loan = approvedLoan(15L);
+        when(loanMapper.selectById(15L)).thenReturn(loan);
+        stubApprovedAuditRecord();
+        when(accessControlService.isSuperAdmin(2L)).thenReturn(false);
+        when(accessControlService.roleIds(2L)).thenReturn(java.util.List.of(2L));
+        when(auditNodeMapper.selectById(any())).thenReturn(loanNode(2L));
+        when(loanMapper.updateById(any(LoanRecord.class))).thenReturn(1);
+
+        service.releaseLoan(2L, 15L);
+
+        assertEquals(StatusEnums.LoanStatus.RELEASED.value, loan.getStatus());
+        // 受托支付口径：写入记账流水，但不改变钱包余额。
+        ArgumentCaptor<WalletTransaction> txCaptor = ArgumentCaptor.forClass(WalletTransaction.class);
+        verify(transactionMapper).insert(txCaptor.capture());
+        WalletTransaction tx = txCaptor.getValue();
+        assertEquals(StatusEnums.WalletTransactionType.LOAN_RELEASE.value, tx.getTransType());
+        assertEquals(StatusEnums.WalletDirection.OUT.value, tx.getDirection());
+        assertEquals(0, BigDecimal.ZERO.compareTo(tx.getBalanceAfter()));
+        ArgumentCaptor<SysOperLog> logCaptor = ArgumentCaptor.forClass(SysOperLog.class);
+        verify(operLogMapper).insert(logCaptor.capture());
+        assertEquals("确认放款", logCaptor.getValue().getAction());
+        verifyNoInteractions(walletMapper);
+    }
+
+    /** P20：超管可直接放款，同样记账。 */
+    @Test
+    void releaseLoanBySuperAdminIsAllowed() {
+        LoanRecord loan = approvedLoan(16L);
+        when(loanMapper.selectById(16L)).thenReturn(loan);
+        stubApprovedAuditRecord();
+        when(accessControlService.isSuperAdmin(1L)).thenReturn(true);
+        when(loanMapper.updateById(any(LoanRecord.class))).thenReturn(1);
+
+        service.releaseLoan(1L, 16L);
+
+        assertEquals(StatusEnums.LoanStatus.RELEASED.value, loan.getStatus());
+        verify(transactionMapper).insert(any(com.nzxhjy.agri.service.entity.WalletTransaction.class));
+    }
+
+    /** P20：还款写入 IN 方向流水，且额度占用随状态变为已还款而释放。 */
+    @Test
+    void repayLoanWritesTransactionAndReleasesCredit() {
+        LoanRecord loan = releasedLoan(17L);
+        when(loanMapper.selectById(17L)).thenReturn(loan);
+        // 超管短路权限校验，无需审核记录与节点查询。
+        when(accessControlService.isSuperAdmin(1L)).thenReturn(true);
+        when(loanMapper.updateById(any(LoanRecord.class))).thenReturn(1);
+
+        service.repayLoan(1L, 17L);
+
+        assertEquals(StatusEnums.LoanStatus.REPAID.value, loan.getStatus());
+        ArgumentCaptor<WalletTransaction> txCaptor = ArgumentCaptor.forClass(WalletTransaction.class);
+        verify(transactionMapper).insert(txCaptor.capture());
+        assertEquals(StatusEnums.WalletTransactionType.LOAN_REPAY.value, txCaptor.getValue().getTransType());
+        assertEquals(StatusEnums.WalletDirection.IN.value, txCaptor.getValue().getDirection());
+        ArgumentCaptor<SysOperLog> logCaptor = ArgumentCaptor.forClass(SysOperLog.class);
+        verify(operLogMapper).insert(logCaptor.capture());
+        assertEquals("确认还款", logCaptor.getValue().getAction());
+    }
+
+    /** P20 连带：贷款记账流水不能出现在门户钱包流水中（否则用户会误以为余额被扣）。 */
+    @Test
+    void walletTransactionsExcludesLoanBookkeeping() {
+        when(transactionMapper.selectPage(any(), any())).thenReturn(page(java.util.List.of()));
+
+        service.walletTransactions(7L, 1, 10, null);
+
+        // 锁定查询条件：必须排除 5（放款）与 6（还款）两类记账流水。
+        verify(transactionMapper).selectPage(any(), argThat(wrapper ->
+                wrapper.getSqlSegment().contains("trans_type NOT IN") || wrapper.getSqlSegment().contains("trans_type NOT IN")));
+    }
+
+    /** P20：还款后 loanUsed 不再统计该笔，额度占用自动释放。 */
+    @Test
+    void repaidLoanNoLongerOccupiesCredit() {
+        // loanUsed 的查询条件限定 status IN (0,1)，已还款(2)由 SQL 层排除，这里锁定该条件。
+        when(loanMapper.selectList(any())).thenReturn(java.util.List.of());
+
+        assertEquals(BigDecimal.ZERO, service.loanUsed(17L));
+    }
+
+    /** 放款/还款前置：必须存在一条已审核通过的贷款审核记录。 */
+    private void stubApprovedAuditRecord() {
+        AuditRecord record = new AuditRecord();
+        record.setId(70L);
+        record.setBizType(6);
+        record.setStatus(1);
+        record.setFlowNodeId(60L);
+        when(auditRecordMapper.selectOne(any())).thenReturn(record);
+    }
+
+    private LoanRecord approvedLoan(Long id) {
+        LoanRecord loan = new LoanRecord();
+        loan.setId(id);
+        loan.setUserId(7L);
+        loan.setLoanNo("LN" + id);
+        loan.setAmount(new BigDecimal("100.00"));
+        loan.setCreditLimitUsed(new BigDecimal("100.00"));
+        loan.setStatus(StatusEnums.LoanStatus.APPLYING.value);
+        return loan;
+    }
+
+    private LoanRecord releasedLoan(Long id) {
+        LoanRecord loan = approvedLoan(id);
+        loan.setStatus(StatusEnums.LoanStatus.RELEASED.value);
+        return loan;
+    }
+
+    private AuditNode loanNode(Long roleId) {
+        AuditNode node = new AuditNode();
+        node.setId(60L);
+        node.setRoleId(roleId);
+        node.setNodeName("贷款审核");
+        return node;
+    }
+
+    private <T> com.baomidou.mybatisplus.core.metadata.IPage<T> page(java.util.List<T> records) {
+        com.baomidou.mybatisplus.extension.plugins.pagination.Page<T> page =
+                new com.baomidou.mybatisplus.extension.plugins.pagination.Page<>(1, 10);
+        page.setRecords(records);
+        page.setTotal(records.size());
+        return page;
+    }
+
+main
     private LoanRecord loan(String creditLimitUsed) {
         LoanRecord record = new LoanRecord();
         record.setUserId(7L);

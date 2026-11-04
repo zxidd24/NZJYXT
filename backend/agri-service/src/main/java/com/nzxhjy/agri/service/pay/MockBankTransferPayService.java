@@ -1,6 +1,8 @@
 package com.nzxhjy.agri.service.pay;
 
+import com.nzxhjy.agri.common.enums.ErrorCodeEnum;
 import com.nzxhjy.agri.common.enums.StatusEnums;
+import com.nzxhjy.agri.common.exception.BusinessException;
 import com.nzxhjy.agri.service.entity.OrderMain;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -35,10 +37,21 @@ public class MockBankTransferPayService implements PayService {
 
     @Override
     public PayOutcome pay(Long userId, OrderMain order) {
+        // 一期由买家主动汇款：收款人、开户行、账号缺一不可，否则买家无法完成转账。
+        // 这里必须明确拒绝，而不是返回空账号让用户无从付款。
+        if (isBlank(settlementAccount.payeeName()) || isBlank(settlementAccount.bankName())
+                || isBlank(settlementAccount.accountNo())) {
+            throw new BusinessException(ErrorCodeEnum.BUSINESS_ERROR.getCode(),
+                    "平台结算账户未配置，暂不支持银行转账，请联系平台");
+        }
         // TODO 二期：调用中行「生成支付订单」（订单号、金额、附言），
         //  返回支付订单号/收款虚拟账号；到账由「到账通知回调」验签后驱动
         //  OrderService.confirmBankTransferReceived，不得在此直接放行。
         return PayOutcome.PENDING;
+    }
+
+    private static boolean isBlank(String value) {
+        return value == null || value.isBlank();
     }
 
     @Override

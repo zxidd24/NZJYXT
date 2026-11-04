@@ -22,7 +22,8 @@ public final class StatusEnums {
         public final int value; AuditStatus(int value) { this.value = value; } }
     public enum AuditBizType { AUTH(1), PRODUCT_SHELF(2), PRODUCT_PRICE_STOCK(3), ORDER(4), REFUND(5), LOAN(6);
         public final int value; AuditBizType(int value) { this.value = value; } }
-    public enum WalletTransactionType { DEPOSIT(1), WITHDRAW(2), PAYMENT(3), REFUND(4);
+    /** 流水类型。5-贷款放款、6-贷款还款为受托支付口径的记账流水，不改变钱包余额。 */
+    public enum WalletTransactionType { DEPOSIT(1), WITHDRAW(2), PAYMENT(3), REFUND(4), LOAN_RELEASE(5), LOAN_REPAY(6);
         public final int value; WalletTransactionType(int value) { this.value = value; } }
     public enum WalletDirection { IN(1), OUT(2); public final int value; WalletDirection(int value) { this.value = value; } }
     public enum OrderAttachmentType { CUSTOMER_RECEIPT(1), SIGNED_DELIVERY(2);

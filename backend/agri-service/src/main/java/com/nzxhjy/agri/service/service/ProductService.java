@@ -3,6 +3,8 @@ package com.nzxhjy.agri.service.service;
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.nzxhjy.agri.common.enums.ErrorCodeEnum;
 import com.nzxhjy.agri.common.enums.StatusEnums;
 import com.nzxhjy.agri.common.exception.BusinessException;
@@ -34,6 +36,9 @@ import java.util.Map;
 @Service
 @RequiredArgsConstructor
 public class ProductService {
+    /** 商品审核快照使用：独立实例只做 JSON 序列化，不参与 Spring 容器装配。 */
+    private static final ObjectMapper SNAPSHOT_MAPPER = new ObjectMapper();
+
     private final ProductMapper productMapper;
     private final ProductCategoryMapper categoryMapper;
     private final ProductReferenceMapper productReferenceMapper;
@@ -53,7 +58,8 @@ public class ProductService {
         product.setIsRecommend(0);
         product.setCreatedBy(operatorId);
         productMapper.insert(product);
-        createAudit(product, operatorId, StatusEnums.AuditBizType.PRODUCT_SHELF.value, "商品上架：" + product.getName());
+        // 新建商品没有历史状态，驳回后直接进入“审核驳回”，无需快照。
+        createAudit(product, operatorId, StatusEnums.AuditBizType.PRODUCT_SHELF.value, "商品上架：" + product.getName(), null);
         return product.getId();
     }
 
@@ -61,11 +67,15 @@ public class ProductService {
     public void update(Long operatorId, Long id, ProductCommand command) {
         validateCommand(command);
         Product product = requireProduct(id);
+        // 审核中的商品禁止再次提交：否则会覆盖待审核版本，且必然撞上“已有待审核任务”的重复提交错误。
+        requireNoPendingAudit(product.getId());
         requireEnabledCategory(requireCategory(command.categoryId()));
+        String snapshot = snapshotOf(product);
         apply(product, command);
         product.setStatus(StatusEnums.ProductStatus.PENDING_AUDIT.value);
         productMapper.updateById(product);
-        createAudit(product, operatorId, StatusEnums.AuditBizType.PRODUCT_SHELF.value, "商品重新上架审核：" + product.getName());
+        createAudit(product, operatorId, StatusEnums.AuditBizType.PRODUCT_SHELF.value,
+                "商品重新上架审核：" + product.getName(), snapshot);
     }
 
     @Transactional
@@ -76,12 +86,106 @@ public class ProductService {
                 && product.getStatus() != StatusEnums.ProductStatus.OFF_SALE.value)) {
             throw new BusinessException(ErrorCodeEnum.BUSINESS_ERROR.getCode(), "只有已审核商品可以修改量价");
         }
+        requireNoPendingAudit(product.getId());
+        String snapshot = snapshotOf(product);
         product.setPrice(price);
         product.setStock(stock);
         product.setStatus(StatusEnums.ProductStatus.PENDING_AUDIT.value);
         productMapper.updateById(product);
         createAudit(product, operatorId, StatusEnums.AuditBizType.PRODUCT_PRICE_STOCK.value,
-                "商品量价修改：" + product.getName());
+                "商品量价修改：" + product.getName(), snapshot);
+    }
+
+    /**
+     * 商品审核终审落地：按业务类型与提交前快照决定最终状态。
+     *
+     * <ul>
+     *   <li>上架审核（2）通过 → 上架；驳回 → 恢复提交前状态（新建商品无快照则置审核驳回）。</li>
+     *   <li>量价审核（3）通过/驳回 → 一律恢复提交前状态；驳回时并回退价格与库存。</li>
+     * </ul>
+     * 修复“已下架商品改量价被强制上架”“在售商品审核驳回后卡在审核驳回且无法回滚”两个问题。
+     */
+    @Transactional
+    public void applyAuditResult(Long productId, int bizType, boolean approved, String snapshotJson) {
+        Product product = requireProduct(productId);
+        Map<String, Object> snapshot = parseSnapshot(snapshotJson);
+        if (!approved) {
+            if (snapshot != null) {
+                product.setStatus(auditedStatus(snapshot));
+                applyAmountSnapshot(product, snapshot);
+            } else {
+                product.setStatus(StatusEnums.ProductStatus.REJECTED.value);
+            }
+            productMapper.updateById(product);
+            return;
+        }
+        if (bizType == StatusEnums.AuditBizType.PRODUCT_SHELF.value) {
+            product.setStatus(StatusEnums.ProductStatus.ON_SALE.value);
+        } else if (snapshot != null) {
+            // 量价修改只改价格与库存，上架状态必须沿用提交前状态，不得被静默改为上架。
+            product.setStatus(auditedStatus(snapshot));
+        } else {
+            product.setStatus(StatusEnums.ProductStatus.ON_SALE.value);
+        }
+        productMapper.updateById(product);
+    }
+
+    /** 提交前状态只可能是上架/下架；其他值（如待审核）回退时按已下架保守处理。 */
+    private int auditedStatus(Map<String, Object> snapshot) {
+        Object value = snapshot.get("status");
+        if (value instanceof Number number) {
+            int status = number.intValue();
+            if (status == StatusEnums.ProductStatus.ON_SALE.value
+                    || status == StatusEnums.ProductStatus.OFF_SALE.value) {
+                return status;
+            }
+        }
+        return StatusEnums.ProductStatus.OFF_SALE.value;
+    }
+
+    private void applyAmountSnapshot(Product product, Map<String, Object> snapshot) {
+        Object price = snapshot.get("price");
+        if (price != null) product.setPrice(new BigDecimal(price.toString()));
+        Object stock = snapshot.get("stock");
+        if (stock instanceof Number number) product.setStock(number.intValue());
+    }
+
+    private String snapshotOf(Product product) {
+        Map<String, Object> snapshot = new LinkedHashMap<>();
+        snapshot.put("status", product.getStatus());
+        snapshot.put("price", product.getPrice() == null ? null : product.getPrice().toPlainString());
+        snapshot.put("stock", product.getStock());
+        try {
+            return SNAPSHOT_MAPPER.writeValueAsString(snapshot);
+        } catch (JsonProcessingException exception) {
+            throw new BusinessException(ErrorCodeEnum.SYSTEM_ERROR.getCode(), "商品审核快照生成失败");
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> parseSnapshot(String snapshotJson) {
+        if (snapshotJson == null || snapshotJson.isBlank()) return null;
+        try {
+            return SNAPSHOT_MAPPER.readValue(snapshotJson, Map.class);
+        } catch (JsonProcessingException exception) {
+            // 快照损坏不应阻断审核，降级为“无快照”按新建商品规则处理。
+            return null;
+        }
+    }
+
+    private void requireNoPendingAudit(Long productId) {
+        long pending = auditRecordMapper.selectCount(Wrappers.<AuditRecord>lambdaQuery()
+                .eq(AuditRecord::getBizType, StatusEnums.AuditBizType.PRODUCT_SHELF.value)
+                .eq(AuditRecord::getBizId, productId)
+                .eq(AuditRecord::getStatus, StatusEnums.AuditStatus.PENDING.value))
+                + auditRecordMapper.selectCount(Wrappers.<AuditRecord>lambdaQuery()
+                .eq(AuditRecord::getBizType, StatusEnums.AuditBizType.PRODUCT_PRICE_STOCK.value)
+                .eq(AuditRecord::getBizId, productId)
+                .eq(AuditRecord::getStatus, StatusEnums.AuditStatus.PENDING.value));
+        if (pending > 0) {
+            throw new BusinessException(ErrorCodeEnum.DUPLICATE_SUBMIT.getCode(),
+                    "该商品正在审核中，请等待审核完成后再操作");
+        }
     }
 
     @Transactional
@@ -204,7 +308,7 @@ public class ProductService {
         product.setImages(trimToNull(command.images()));
     }
 
-    private void createAudit(Product product, Long applicantId, int bizType, String summary) {
+    private void createAudit(Product product, Long applicantId, int bizType, String summary, String snapshot) {
         long pending = auditRecordMapper.selectCount(Wrappers.<AuditRecord>lambdaQuery().eq(AuditRecord::getBizType, bizType)
                 .eq(AuditRecord::getBizId, product.getId()).eq(AuditRecord::getStatus, StatusEnums.AuditStatus.PENDING.value));
         if (pending > 0) throw new BusinessException(ErrorCodeEnum.DUPLICATE_SUBMIT.getCode(), "该商品已有待审核任务");
@@ -222,6 +326,7 @@ public class ProductService {
         record.setStatus(StatusEnums.AuditStatus.PENDING.value);
         record.setApplicantId(applicantId);
         record.setApplyTime(LocalDateTime.now());
+        record.setBizSnapshot(snapshot);
         auditRecordMapper.insert(record);
         messageService.sendTodo(node.getId(), bizType, product.getId());
     }

@@ -150,9 +150,9 @@ public class AuditTaskService {
         if (updated == 0) {
             throw new BusinessException(ErrorCodeEnum.DUPLICATE_SUBMIT.getCode(), "该任务已处理");
         }
+        // 按业务类型与提交前快照落地最终状态，避免量价审核把商品静默上下架。
+        productService.applyAuditResult(record.getBizId(), record.getBizType(), approved, record.getBizSnapshot());
         var product = productService.requireProduct(record.getBizId());
-        product.setStatus(approved ? StatusEnums.ProductStatus.ON_SALE.value : StatusEnums.ProductStatus.REJECTED.value);
-        productService.updateStatus(product);
 
         messageService.send(record.getApplicantId(), "PRODUCT_AUDIT_RESULT", record.getBizType(), product.getId(),
                 java.util.Map.of("商品名", product.getName(), "结果", approved ? "通过" : "驳回", "备注", remark == null ? "" : remark));
@@ -186,7 +186,7 @@ public class AuditTaskService {
         return new TaskView(record.getId(), record.getBizType(), bizTypeName(record.getBizType()),
                 record.getBizId(), record.getBizNo(), record.getBizSummary(), record.getNodeName(),
                 record.getStatus(), record.getApplicantId(), record.getApplyTime(), record.getAuditorId(),
-                record.getAuditTime(), record.getRemark());
+                record.getAuditTime(), record.getRemark(), record.getBizSnapshot());
     }
 
     private String bizTypeName(Integer bizType) {
@@ -217,6 +217,8 @@ public class AuditTaskService {
         private Long auditorId;
         private LocalDateTime auditTime;
         private String remark;
+        /** 商品类审核的提交前快照，前端用于展示“修改前 → 修改后”对比。 */
+        private String bizSnapshot;
     }
 
     @Data
