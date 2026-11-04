@@ -45,6 +45,7 @@ public class FinanceService {
     private final MessageService messageService;
     private final AccessControlService accessControlService;
     private final AesUtils aesUtils;
+    private final SysOperLogMapper operLogMapper;
 
     @Transactional
     public RefundView applyRefund(Long userId, Long orderId, BigDecimal amount, String reason) {
@@ -57,7 +58,12 @@ public class FinanceService {
             throw business("当前订单不可申请退款");
         }
         amount = validAmount(amount, "退款金额");
-        if (amount.compareTo(defaultAmount(order.getPayAmount())) > 0) throw business("退款金额不能超过订单实付金额");
+        // 一期只支持整单退款：退款金额必须等于实付金额。
+        // 现有状态机没有"部分退款"的位置，且审批通过时会按整单回补库存与置为已退款，
+        // 允许部分金额会造成账实不符（退3元、实付10元却整单退款）。
+        if (amount.compareTo(defaultAmount(order.getPayAmount())) != 0) {
+            throw business("退款金额必须等于订单实付金额" + defaultAmount(order.getPayAmount()).toPlainString() + "元");
+        }
         long active = refundMapper.selectCount(Wrappers.<RefundApply>lambdaQuery().eq(RefundApply::getOrderId, orderId)
                 .in(RefundApply::getStatus, StatusEnums.RefundStatus.PENDING_AUDIT.value, StatusEnums.RefundStatus.APPROVED.value));
         if (active > 0) throw business("该订单已有进行中的退款申请");
@@ -134,8 +140,23 @@ public class FinanceService {
 
     public WalletView walletInfo(Long userId) { return walletView(account(userId)); }
 
+    /** 贷款放款/还款为受托支付口径的记账流水，不改变钱包余额，也不出现在钱包流水中。 */
+    private static final List<Integer> LOAN_TRANS_TYPES = List.of(
+            StatusEnums.WalletTransactionType.LOAN_RELEASE.value,
+            StatusEnums.WalletTransactionType.LOAN_REPAY.value);
+
     public PageResult<TransactionView> transactions(Long userId, int pageNum, int pageSize, Integer transType) {
         IPage<WalletTransaction> page = transactionMapper.selectPage(new Page<>(pageNum, pageSize), Wrappers.<WalletTransaction>lambdaQuery().eq(userId != null, WalletTransaction::getUserId, userId).eq(transType != null, WalletTransaction::getTransType, transType).orderByDesc(WalletTransaction::getCreatedAt));
+        return new PageResult<>(page.getTotal(), pageNum, pageSize, page.getRecords().stream().map(this::transactionView).toList());
+    }
+
+    /** 门户钱包流水：排除贷款记账流水，避免用户看到"放款扣款"却余额没变。 */
+    public PageResult<TransactionView> walletTransactions(Long userId, int pageNum, int pageSize, Integer transType) {
+        IPage<WalletTransaction> page = transactionMapper.selectPage(new Page<>(pageNum, pageSize), Wrappers.<WalletTransaction>lambdaQuery()
+                .eq(WalletTransaction::getUserId, userId)
+                .eq(transType != null, WalletTransaction::getTransType, transType)
+                .notIn(WalletTransaction::getTransType, LOAN_TRANS_TYPES)
+                .orderByDesc(WalletTransaction::getCreatedAt));
         return new PageResult<>(page.getTotal(), pageNum, pageSize, page.getRecords().stream().map(this::transactionView).toList());
     }
 
@@ -189,8 +210,82 @@ public class FinanceService {
         return loan == null ? null : loanView(loan);
     }
     @Transactional public void auditLoan(Long adminId, Long id, boolean approved, String remark) { LoanRecord loan = loanMapper.selectById(id); if (loan == null || !Objects.equals(loan.getStatus(), 0)) throw business("贷款申请不存在或已处理"); AuditRecord record = pendingAudit(StatusEnums.AuditBizType.LOAN.value, id); if (record == null || !canAudit(adminId, record)) throw new BusinessException(ErrorCodeEnum.FORBIDDEN.getCode(), ErrorCodeEnum.FORBIDDEN.getMessage()); if (!approved && (remark == null || remark.isBlank())) throw business("驳回时必须填写原因"); updateAudit(record.getId(), adminId, approved, remark, LocalDateTime.now()); if (!approved) { loan.setStatus(3); loan.setAuditRemark(trim(remark, 255)); } loan.setAuditTime(LocalDateTime.now()); loan.setAuditorId(adminId); loanMapper.updateById(loan); messageService.send(loan.getUserId(), "LOAN_RESULT", 6, loan.getId(), java.util.Map.of("贷款编号", loan.getLoanNo(), "结果", approved ? "通过" : "驳回", "备注", remark == null ? "" : remark)); }
-    @Transactional public void releaseLoan(Long adminId, Long id) { LoanRecord loan = loanMapper.selectById(id); if (loan == null || !Objects.equals(loan.getStatus(), 0)) throw business("贷款申请状态不正确"); AuditRecord record = auditRecordMapper.selectOne(Wrappers.<AuditRecord>lambdaQuery().eq(AuditRecord::getBizType, 6).eq(AuditRecord::getBizId, id).eq(AuditRecord::getStatus, 1).last("LIMIT 1")); if (record == null) throw business("贷款尚未审核通过"); loan.setStatus(1); loan.setReleaseTime(LocalDateTime.now()); loanMapper.updateById(loan); }
-    @Transactional public void repayLoan(Long adminId, Long id) { LoanRecord loan = loanMapper.selectById(id); if (loan == null || !Objects.equals(loan.getStatus(), 1)) throw business("贷款尚未放款"); loan.setStatus(2); loan.setRepayTime(LocalDateTime.now()); loanMapper.updateById(loan); }
+    @Transactional
+    public void releaseLoan(Long adminId, Long id) {
+        LoanRecord loan = loanMapper.selectById(id);
+        if (loan == null || !Objects.equals(loan.getStatus(), 0)) throw business("贷款申请状态不正确");
+        AuditRecord record = auditRecordMapper.selectOne(Wrappers.<AuditRecord>lambdaQuery().eq(AuditRecord::getBizType, 6).eq(AuditRecord::getBizId, id).eq(AuditRecord::getStatus, 1).last("LIMIT 1"));
+        if (record == null) throw business("贷款尚未审核通过");
+        requireLoanOperator(adminId, loan, "确认放款");
+        LocalDateTime now = LocalDateTime.now();
+        loan.setStatus(StatusEnums.LoanStatus.RELEASED.value);
+        loan.setReleaseTime(now);
+        if (loanMapper.updateById(loan) != 1) throw business("放款状态更新失败");
+        // 受托支付口径：放款只记账，不进入用户钱包余额，但要进财务报表。
+        recordLoanTransaction(loan, StatusEnums.WalletTransactionType.LOAN_RELEASE.value,
+                StatusEnums.WalletDirection.OUT.value, "贷款放款（受托支付）");
+        writeOperLog(adminId, "贷款服务", "确认放款", loan, null);
+    }
+
+    @Transactional
+    public void repayLoan(Long adminId, Long id) {
+        LoanRecord loan = loanMapper.selectById(id);
+        if (loan == null || !Objects.equals(loan.getStatus(), 1)) throw business("贷款尚未放款");
+        requireLoanOperator(adminId, loan, "确认还款");
+        LocalDateTime now = LocalDateTime.now();
+        loan.setStatus(StatusEnums.LoanStatus.REPAID.value);
+        loan.setRepayTime(now);
+        if (loanMapper.updateById(loan) != 1) throw business("还款状态更新失败");
+        // 还款同样只记账；额度占用随状态变为"已还款"自动释放（loanUsed 只统计 0/1）。
+        recordLoanTransaction(loan, StatusEnums.WalletTransactionType.LOAN_REPAY.value,
+                StatusEnums.WalletDirection.IN.value, "贷款还款");
+        writeOperLog(adminId, "贷款服务", "确认还款", loan, null);
+    }
+
+    /** 放款/还款的操作门槛：超管，或持有贷款审核节点对应角色且与审核人不同为佳（此处至少要求节点角色）。 */
+    private void requireLoanOperator(Long adminId, LoanRecord loan, String action) {
+        if (adminId == null) throw new BusinessException(ErrorCodeEnum.FORBIDDEN.getCode(), ErrorCodeEnum.FORBIDDEN.getMessage());
+        if (accessControlService.isSuperAdmin(adminId)) return;
+        AuditRecord record = auditRecordMapper.selectOne(Wrappers.<AuditRecord>lambdaQuery()
+                .eq(AuditRecord::getBizType, StatusEnums.AuditBizType.LOAN.value)
+                .eq(AuditRecord::getBizId, loan.getId())
+                .eq(AuditRecord::getStatus, StatusEnums.AuditStatus.APPROVED.value)
+                .orderByDesc(AuditRecord::getId).last("LIMIT 1"));
+        AuditNode node = record == null ? null : auditNodeMapper.selectById(record.getFlowNodeId());
+        boolean allowed = node != null && node.getRoleId() != null
+                && accessControlService.roleIds(adminId).contains(node.getRoleId());
+        if (!allowed) {
+            throw new BusinessException(ErrorCodeEnum.FORBIDDEN.getCode(),
+                    "没有权限执行" + action + "：需贷款审核节点对应角色");
+        }
+    }
+
+    /** 受托支付口径的记账流水：不改变钱包余额，balanceAfter 记 0，仅用于财务报表口径统一。 */
+    private void recordLoanTransaction(LoanRecord loan, int transType, int direction, String remark) {
+        WalletTransaction tx = new WalletTransaction();
+        tx.setUserId(loan.getUserId());
+        tx.setTransNo(generateNo("LT"));
+        tx.setAmount(defaultAmount(loan.getAmount()));
+        tx.setDirection(direction);
+        tx.setTransType(transType);
+        tx.setTransStatus(StatusEnums.WalletTransactionStatus.SUCCESS.value);
+        tx.setBalanceAfter(BigDecimal.ZERO);
+        tx.setRemark(remark);
+        transactionMapper.insert(tx);
+    }
+
+    private void writeOperLog(Long operatorId, String module, String action, LoanRecord loan, String detail) {
+        SysOperLog log = new SysOperLog();
+        log.setOperatorId(operatorId);
+        log.setModule(module);
+        log.setAction(action);
+        log.setTargetType("loan_record");
+        log.setTargetId(String.valueOf(loan.getId()));
+        log.setDetail(detail == null
+                ? String.format("{\"loanNo\":\"%s\",\"amount\":%s}", loan.getLoanNo(), defaultAmount(loan.getAmount()).toPlainString())
+                : detail);
+        operLogMapper.insert(log);
+    }
 
     public PageResult<TransactionView> accountDetail(int pageNum, int pageSize, Integer transType) { return transactions(null, pageNum, pageSize, transType); }
     public List<IncomeExpense> incomeExpense(String period, LocalDate date) { var query = Wrappers.<WalletTransaction>query().eq("trans_status", 1); if (date != null) query.ge("created_at", date.atStartOfDay()).lt("created_at", date.plusDays(1).atStartOfDay()); List<WalletTransaction> rows = transactionMapper.selectList(query); Map<String, BigDecimal[]> groups = new TreeMap<>(); for (WalletTransaction tx : rows) { if (tx.getCreatedAt() == null) continue; String key = "month".equalsIgnoreCase(period) ? tx.getCreatedAt().toLocalDate().withDayOfMonth(1).toString() : tx.getCreatedAt().toLocalDate().toString(); BigDecimal[] sum = groups.computeIfAbsent(key, k -> new BigDecimal[]{BigDecimal.ZERO, BigDecimal.ZERO}); if (tx.getDirection() != null && tx.getDirection() == 1) sum[0] = sum[0].add(defaultAmount(tx.getAmount())); else sum[1] = sum[1].add(defaultAmount(tx.getAmount())); } return groups.entrySet().stream().map(e -> new IncomeExpense(e.getKey(), e.getValue()[0], e.getValue()[1], e.getValue()[0].subtract(e.getValue()[1]))).toList(); }
@@ -207,7 +302,8 @@ public class FinanceService {
     private void addTransaction(Long userId, Long orderId, BigDecimal amount, int direction, int type, String remark) { WalletAccount account = account(userId); WalletTransaction tx = new WalletTransaction(); tx.setUserId(userId); tx.setOrderId(orderId); tx.setTransNo(generateNo("WT")); tx.setAmount(amount); tx.setDirection(direction); tx.setTransType(type); tx.setTransStatus(1); tx.setBalanceAfter(defaultAmount(account.getBalance())); tx.setRemark(remark); transactionMapper.insert(tx); }
     private WalletAccount account(Long userId) { WalletAccount account = walletMapper.selectOne(Wrappers.<WalletAccount>lambdaQuery().eq(WalletAccount::getUserId, userId)); if (account == null) { account = new WalletAccount(); account.setUserId(userId); account.setBalance(BigDecimal.ZERO); account.setFrozenAmount(BigDecimal.ZERO); walletMapper.insert(account); } return account; }
     private OrderMain ownedOrder(Long userId, Long orderId) { OrderMain order = orderMapper.selectById(orderId); if (order == null || !Objects.equals(order.getUserId(), userId)) throw business("订单不存在"); return order; }
-    private BigDecimal loanUsed(Long userId) { return loanMapper.selectList(Wrappers.<LoanRecord>lambdaQuery().eq(LoanRecord::getUserId, userId).in(LoanRecord::getStatus, 0, 1)).stream().map(LoanRecord::getCreditLimitUsed).filter(Objects::nonNull).reduce(BigDecimal.ZERO, BigDecimal::add); }
+    /** 已占用授信额度：申请中(0)与已放款(1)的贷款合计，供评级校验等场景复用。 */
+    public BigDecimal loanUsed(Long userId) { return loanMapper.selectList(Wrappers.<LoanRecord>lambdaQuery().eq(LoanRecord::getUserId, userId).in(LoanRecord::getStatus, 0, 1)).stream().map(LoanRecord::getCreditLimitUsed).filter(Objects::nonNull).reduce(BigDecimal.ZERO, BigDecimal::add); }
     private RefundView refundView(RefundApply r) { String productName = detailMapper.selectList(Wrappers.<OrderDetail>lambdaQuery().eq(OrderDetail::getOrderId, r.getOrderId())).stream().map(OrderDetail::getProductName).filter(Objects::nonNull).findFirst().orElse(""); return new RefundView(r.getId(), r.getRefundNo(), r.getOrderId(), productName, r.getOrderAmount(), r.getRefundAmount(), r.getReason(), r.getStatus(), r.getRefundChannel(), r.getApplyTime(), r.getAuditTime(), r.getRemark()); }
     private CommentView commentView(OrderComment c) { Product p = productMapper.selectById(c.getProductId()); SysUser u = c.getUserId() == null ? null : userMapper.selectById(c.getUserId()); return new CommentView(c.getId(), c.getOrderId(), c.getProductId(), p == null ? null : p.getName(), c.getUserId(), u == null ? null : u.getRealName(), c.getScore(), c.getContent(), c.getImages(), c.getCreatedAt()); }
     private WalletView walletView(WalletAccount a) { return new WalletView(a.getUserId(), defaultAmount(a.getBalance()), defaultAmount(a.getFrozenAmount())); }

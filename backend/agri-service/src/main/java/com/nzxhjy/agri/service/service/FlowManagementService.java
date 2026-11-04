@@ -2,6 +2,7 @@ package com.nzxhjy.agri.service.service;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.nzxhjy.agri.common.enums.ErrorCodeEnum;
+import com.nzxhjy.agri.common.enums.StatusEnums;
 import com.nzxhjy.agri.common.exception.BusinessException;
 import com.nzxhjy.agri.service.entity.AuditFlow;
 import com.nzxhjy.agri.service.entity.AuditNode;
@@ -39,6 +40,7 @@ public class FlowManagementService {
         AuditFlow flow = requireFlow(bizType);
         List<FlowNodeCommand> nodes = command.getNodes() == null ? List.of() : command.getNodes();
         validateNodes(flow.getId(), nodes, false);
+        requireSupportedNodeCount(bizType, nodes.size());
         flow.setFlowName(command.getFlowName() == null || command.getFlowName().isBlank() ? flow.getFlowName() : command.getFlowName().trim());
         flow.setEnabled(command.getEnabled() == null ? flow.getEnabled() : command.getEnabled() == 1 ? 1 : 0);
         flowMapper.updateById(flow);
@@ -53,6 +55,7 @@ public class FlowManagementService {
         if (command.getNodeName() == null || command.getNodeName().isBlank()) throw invalid("节点名称不能为空");
         if (command.getRoleId() == null || roleMapper.selectById(command.getRoleId()) == null) throw business("审核角色不存在");
         List<AuditNode> current = nodes(flow.getId());
+        requireSupportedNodeCount(flow.getBizType(), current.size() + 1);
         int target = command.getNodeOrder() == null ? current.size() + 1 : Math.max(1, Math.min(command.getNodeOrder(), current.size() + 1));
         nodeMapper.update(null, Wrappers.<AuditNode>lambdaUpdate().eq(AuditNode::getFlowId, flow.getId()).setSql("node_order = node_order + 1000"));
         int order = 1;
@@ -73,6 +76,22 @@ public class FlowManagementService {
         nodeMapper.deleteById(id);
         List<AuditNode> remaining = nodes(node.getFlowId());
         reorderExisting(node.getFlowId(), remaining);
+    }
+
+    /**
+     * 限制可配置的审核节点数量。
+     *
+     * <p>目前只有订单流程（bizType=4）实现了"审核通过后创建下一节点"的推进逻辑，
+     * 实名认证、商品上架、量价修改、退款、贷款五类业务只创建首节点记录。
+     * 若允许它们配置多个节点，第二节点永远不会生成待办，业务会在只经过首节点的情况下
+     * 被终审通过——属于静默的流程绕过。因此在配置入口直接堵死，避免越权终审。</p>
+     */
+    private void requireSupportedNodeCount(Integer bizType, int nodeCount) {
+        if (Objects.equals(bizType, StatusEnums.AuditBizType.ORDER.value)) return;
+        if (nodeCount > 1) {
+            throw new BusinessException(ErrorCodeEnum.BUSINESS_ERROR.getCode(),
+                    "该业务类型的审核流程暂只支持单个审核节点，多节点审核仅支持订单流程");
+        }
     }
 
     private FlowView flowView(AuditFlow flow) {

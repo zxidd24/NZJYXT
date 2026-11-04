@@ -24,6 +24,11 @@ public class AuditRecord {
     private Long auditorId;
     private LocalDateTime auditTime;
     private String remark;
+    /**
+     * 业务快照（JSON）：保存提交审核前的关键状态，供审核人对比与驳回回滚。
+     * 商品类审核格式 {"status":1,"price":"10.00","stock":100}。
+     */
+    private String bizSnapshot;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 }

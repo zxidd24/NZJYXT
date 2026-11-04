@@ -26,17 +26,27 @@ const statusText = { 0: "待审核", 1: "已上架", 2: "已下架", 3: "审核�
 async function load() {
   loading.value = true;
   try {
-    const [productData, categoryData] = await Promise.all([
-      fetchPage((params) => request.get("/api/admin/product/page", { params: { ...filters, ...params } })),
-      request.get("/api/admin/category"),
-    ]);
+    // 分类接口要求 admin:system，与商品管理（admin:product）不是同一权限。
+    // 拆开请求：无系统权限时仅分类下拉为空，不影响商品列表展示。
+    const productData = await fetchPage((params) => request.get("/api/admin/product/page", { params: { ...filters, ...params } }));
     rows.value = productData.list;
-    categories.value = categoryData;
+    loadCategories();
   } catch (error) { ElMessage.error(error.message || "商品加载失败"); }
   finally { loading.value = false; }
 }
+async function loadCategories() {
+  try {
+    categories.value = await request.get("/api/admin/category");
+  } catch (_) {
+    categories.value = [];
+  }
+}
 function resetForm(product = null) {
   Object.assign(dialog, product ? { visible: true, id: product.id, categoryId: product.categoryId, name: product.name, subTitle: product.subTitle || "", brand: product.brand || "", price: product.price, stock: product.stock, unit: product.unit || "", description: product.description || "", images: product.images || "" } : { visible: true, id: null, categoryId: null, name: "", subTitle: "", brand: "", price: 0, stock: 0, unit: "", description: "", images: "" });
+}
+// 审核中的商品（状态0）不能再编辑：后端会拒绝重复提交，且会覆盖待审核版本。
+function canEdit(row) {
+  return row.status === 1 || row.status === 2 || row.status === 3;
 }
 async function save() {
   const body = { categoryId: dialog.categoryId, name: dialog.name, subTitle: dialog.subTitle, brand: dialog.brand, price: dialog.price, stock: dialog.stock, unit: dialog.unit, description: dialog.description, images: dialog.images };
@@ -61,7 +71,7 @@ onMounted(load);
   <section>
     <div class="page-heading"><h2>商品管理</h2><div><el-button @click="load">刷新</el-button><el-button type="primary" @click="resetForm()">新增商品</el-button></div></div>
     <el-form inline class="filter-bar"><el-form-item label="分类"><el-select v-model="filters.categoryId" clearable placeholder="全部分类" style="width: 180px"><el-option v-for="item in flatCategories" :key="item.id" :label="item.name" :value="item.id" /></el-select></el-form-item><el-form-item label="状态"><el-select v-model="filters.status" clearable placeholder="全部状态" style="width: 130px"><el-option v-for="(label, value) in statusText" :key="value" :label="label" :value="Number(value)" /></el-select></el-form-item><el-form-item><el-input v-model="filters.name" placeholder="商品名称" clearable @keyup.enter="search" /></el-form-item><el-form-item><el-button type="primary" @click="search">查询</el-button></el-form-item></el-form>
-    <el-table :data="rows" v-loading="loading" stripe><el-table-column prop="name" label="商品名称" min-width="180" /><el-table-column prop="categoryName" label="分类" width="130" /><el-table-column prop="price" label="价格" width="110" /><el-table-column prop="stock" label="库存" width="90" /><el-table-column prop="unit" label="单位" width="80" /><el-table-column label="状态" width="100"><template #default="scope"><el-tag>{{ statusText[scope.row.status] }}</el-tag></template></el-table-column><el-table-column label="推荐" width="80"><template #default="scope">{{ scope.row.isRecommend === 1 ? "是" : "否" }}</template></el-table-column><el-table-column label="操作" min-width="300"><template #default="scope"><el-button link @click="resetForm(scope.row)">编辑</el-button><el-button v-if="scope.row.status === 1 || scope.row.status === 2" link @click="openPrice(scope.row)">改量价</el-button><el-button v-if="scope.row.status === 1 || scope.row.status === 2" link @click="shelf(scope.row)">{{ scope.row.status === 1 ? "下架" : "上架" }}</el-button><el-button v-if="scope.row.status === 1 || scope.row.status === 2" link @click="recommend(scope.row)">{{ scope.row.isRecommend === 1 ? "取消推荐" : "推荐" }}</el-button><el-button type="danger" link @click="remove(scope.row)">删除</el-button></template></el-table-column></el-table>
+    <el-table :data="rows" v-loading="loading" stripe><el-table-column prop="name" label="商品名称" min-width="180" /><el-table-column prop="categoryName" label="分类" width="130" /><el-table-column prop="price" label="价格" width="110" /><el-table-column prop="stock" label="库存" width="90" /><el-table-column prop="unit" label="单位" width="80" /><el-table-column label="状态" width="100"><template #default="scope"><el-tag>{{ statusText[scope.row.status] }}</el-tag></template></el-table-column><el-table-column label="推荐" width="80"><template #default="scope">{{ scope.row.isRecommend === 1 ? "是" : "否" }}</template></el-table-column><el-table-column label="操作" min-width="300"><template #default="scope"><el-tooltip :disabled="canEdit(scope.row)" content="商品审核中，暂不可编辑" placement="top"><span><el-button link :disabled="!canEdit(scope.row)" @click="resetForm(scope.row)">编辑</el-button></span></el-tooltip><el-button v-if="scope.row.status === 1 || scope.row.status === 2" link @click="openPrice(scope.row)">改量价</el-button><el-button v-if="scope.row.status === 1 || scope.row.status === 2" link @click="shelf(scope.row)">{{ scope.row.status === 1 ? "下架" : "上架" }}</el-button><el-button v-if="scope.row.status === 1 || scope.row.status === 2" link @click="recommend(scope.row)">{{ scope.row.isRecommend === 1 ? "取消推荐" : "推荐" }}</el-button><el-button type="danger" link @click="remove(scope.row)">删除</el-button></template></el-table-column></el-table>
     <ListPagination :pagination="pagination" :disabled="loading" @change="load" />
 
     <el-dialog v-model="dialog.visible" :title="dialog.id ? '编辑商品' : '新增商品'" width="560px"><el-form label-width="90px"><el-form-item label="分类"><el-select v-model="dialog.categoryId" placeholder="请选择分类" style="width: 100%"><el-option v-for="item in flatCategories" :key="item.id" :label="item.name" :value="item.id" /></el-select></el-form-item><el-form-item label="名称"><el-input v-model="dialog.name" /></el-form-item><el-form-item label="副标题"><el-input v-model="dialog.subTitle" /></el-form-item><el-form-item label="品牌"><el-input v-model="dialog.brand" /></el-form-item><el-form-item label="价格"><el-input-number v-model="dialog.price" :min="0" :precision="2" /></el-form-item><el-form-item label="库存"><el-input-number v-model="dialog.stock" :min="0" /></el-form-item><el-form-item label="单位"><el-input v-model="dialog.unit" placeholder="吨/袋/瓶" /></el-form-item><el-form-item label="图片地址"><el-input v-model="dialog.images" placeholder="多个地址用逗号分隔" /></el-form-item><el-form-item label="描述"><el-input v-model="dialog.description" type="textarea" :rows="3" /></el-form-item></el-form><template #footer><el-button @click="dialog.visible = false">取消</el-button><el-button type="primary" @click="save">提交审核</el-button></template></el-dialog>

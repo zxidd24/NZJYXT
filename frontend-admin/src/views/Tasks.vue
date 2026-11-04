@@ -94,6 +94,31 @@ async function showDetail(row) {
 function imageUrl(url) {
   return url?.startsWith("http") ? url : portalBase + url;
 }
+// 商品审核快照：后端在提交审核时保存了修改前的状态与量价，用于审核人对比。
+function snapshot() {
+  const raw = detailDialog.value?.task?.bizSnapshot;
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch (_) {
+    return null;
+  }
+}
+function priceCompare() {
+  const detail = detailDialog.value?.bizDetail;
+  const before = snapshot();
+  const current = detail?.price ?? "-";
+  return before ? `${before.price ?? "-"} → ${current}` : current;
+}
+function stockCompare() {
+  const detail = detailDialog.value?.bizDetail;
+  const before = snapshot();
+  const current = `${detail?.stock ?? "-"} ${detail?.unit || ""}`.trim();
+  return before ? `${before.stock ?? "-"} → ${current}` : current;
+}
+function statusText(value) {
+  return ['待审核', '已上架', '已下架', '审核驳回'][value] ?? '-';
+}
 function detailTitle() {
   const t = detailDialog.value?.task;
   if (!t) return "任务详情";
@@ -333,10 +358,11 @@ onMounted(load);
         ><el-descriptions v-if="detailDialog?.bizDetail" :column="2" border
           ><el-descriptions-item label="商品名称">{{ detailDialog.bizDetail.name }}</el-descriptions-item
           ><el-descriptions-item label="分类">{{ detailDialog.bizDetail.categoryName || '-' }}</el-descriptions-item
-          ><el-descriptions-item label="价格">{{ detailDialog.bizDetail.price }}</el-descriptions-item
-          ><el-descriptions-item label="库存">{{ detailDialog.bizDetail.stock }} {{ detailDialog.bizDetail.unit || '' }}</el-descriptions-item
+          ><el-descriptions-item label="价格">{{ priceCompare() }}</el-descriptions-item
+          ><el-descriptions-item label="库存">{{ stockCompare() }}</el-descriptions-item
+          ><el-descriptions-item label="提交前状态">{{ snapshot() ? statusText(snapshot().status) : '-' }}</el-descriptions-item
           ><el-descriptions-item label="状态">{{ ['待审核', '已上架', '已下架', '审核驳回'][detailDialog.bizDetail.status] }}</el-descriptions-item
-          ><el-descriptions-item label="描述">{{ detailDialog.bizDetail.description || '-' }}</el-descriptions-item
+          ><el-descriptions-item label="描述" :span="2">{{ detailDialog.bizDetail.description || '-' }}</el-descriptions-item
         ></el-descriptions
         ><el-empty v-else description="暂无详情数据" /></template
       ></el-dialog

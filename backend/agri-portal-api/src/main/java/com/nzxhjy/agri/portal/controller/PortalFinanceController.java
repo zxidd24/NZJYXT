@@ -31,7 +31,7 @@ public class PortalFinanceController {
     public Result<PageResult<FinanceService.CommentView>> comments(@RequestParam(required = false) Long productId, @RequestParam(defaultValue = "1") int pageNum, @RequestParam(defaultValue = "10") int pageSize) { return Result.success(financeService.commentPage(productId, pageNum, Math.min(pageSize, 100))); }
 
     @GetMapping("/wallet/info") public Result<FinanceService.WalletView> walletInfo() { return Result.success(financeService.walletInfo(UserContext.getUserId())); }
-    @GetMapping("/wallet/transactions") public Result<PageResult<FinanceService.TransactionView>> transactions(@RequestParam(defaultValue = "1") int pageNum, @RequestParam(defaultValue = "10") int pageSize, @RequestParam(required = false) Integer transType) { return Result.success(financeService.transactions(UserContext.getUserId(), pageNum, Math.min(pageSize, 100), transType)); }
+    @GetMapping("/wallet/transactions") public Result<PageResult<FinanceService.TransactionView>> transactions(@RequestParam(defaultValue = "1") int pageNum, @RequestParam(defaultValue = "10") int pageSize, @RequestParam(required = false) Integer transType) { return Result.success(financeService.walletTransactions(UserContext.getUserId(), pageNum, Math.min(pageSize, 100), transType)); }
     @PostMapping("/wallet/deposit") public Result<FinanceService.WalletView> deposit(@Valid @RequestBody AmountRequest request) { return Result.success(financeService.deposit(UserContext.getUserId(), request.amount)); }
     @PostMapping("/wallet/withdraw") public Result<FinanceService.WalletView> withdraw(@Valid @RequestBody AmountRequest request) { return Result.success(financeService.withdraw(UserContext.getUserId(), request.amount)); }
 

@@ -36,7 +36,7 @@ start_process() {
   printf '已启动 %s（PID %s），日志：%s\n' "$name" "$process_pid" "$logfile"
 }
 
-common_env=(DB_HOST="${DB_HOST:-localhost}" DB_PORT="${DB_PORT:-3306}" DB_NAME="${DB_NAME:-agri_trading}" DB_USER="${DB_USER:-root}" DB_PASSWORD="$DB_PASSWORD" REDIS_HOST="${REDIS_HOST:-localhost}" REDIS_PORT="${REDIS_PORT:-6379}" REDIS_PASSWORD="${REDIS_PASSWORD:-}" JWT_SECRET="$JWT_SECRET" AGRI_AES_KEY="$AGRI_AES_KEY" UPLOAD_PATH="${UPLOAD_PATH:-$project_root/uploads}" ORDER_TIMEOUT_ENABLED="${ORDER_TIMEOUT_ENABLED:-false}")
+common_env=(DB_HOST="${DB_HOST:-localhost}" DB_PORT="${DB_PORT:-3306}" DB_NAME="${DB_NAME:-agri_trading}" DB_USER="${DB_USER:-root}" DB_PASSWORD="$DB_PASSWORD" REDIS_HOST="${REDIS_HOST:-localhost}" REDIS_PORT="${REDIS_PORT:-6379}" REDIS_PASSWORD="${REDIS_PASSWORD:-}" JWT_SECRET="$JWT_SECRET" AGRI_AES_KEY="$AGRI_AES_KEY" UPLOAD_PATH="${UPLOAD_PATH:-$project_root/uploads}" ORDER_TIMEOUT_ENABLED="${ORDER_TIMEOUT_ENABLED:-false}" BANK_PAYEE_NAME="${BANK_PAYEE_NAME:-农资现货交易平台}" BANK_NAME="${BANK_NAME:-中国银行}" BANK_ACCOUNT_NO="${BANK_ACCOUNT_NO:-}")
 start_process admin-api env "${common_env[@]}" java -jar "$project_root/backend/agri-admin-api/target/agri-admin-api-0.1.0-SNAPSHOT.jar"
 start_process portal-api env "${common_env[@]}" java -jar "$project_root/backend/agri-portal-api/target/agri-portal-api-0.1.0-SNAPSHOT.jar"
 start_process admin-web bash -c "cd '$project_root/frontend-admin' && exec '$project_root/frontend-admin/node_modules/.bin/vite' preview --host 0.0.0.0 --port '${ADMIN_WEB_PORT:-3000}' --strictPort"

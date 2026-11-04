@@ -413,6 +413,7 @@ CREATE TABLE IF NOT EXISTS `audit_record` (
   `auditor_id` bigint DEFAULT NULL,
   `audit_time` datetime DEFAULT NULL,
   `remark` varchar(255) DEFAULT NULL,
+  `biz_snapshot` json DEFAULT NULL COMMENT '业务快照，保存提交审核前的状态，供对比与驳回回滚',
   `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
   `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
@@ -420,6 +421,18 @@ CREATE TABLE IF NOT EXISTS `audit_record` (
   KEY `idx_status_node` (`status`,`flow_node_id`),
   KEY `idx_auditor` (`auditor_id`,`status`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='审核记录表，统一记录待办、已办和审核流转过程';
+
+-- 已有库补列：商品审核需要保存提交前快照，用于审核对比与驳回回滚。
+SET @snapshot_column_exists = (
+  SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'audit_record' AND COLUMN_NAME = 'biz_snapshot'
+);
+SET @snapshot_column_sql = IF(@snapshot_column_exists = 0,
+  'ALTER TABLE `audit_record` ADD COLUMN `biz_snapshot` json DEFAULT NULL COMMENT ''业务快照，保存提交审核前的状态，供对比与驳回回滚'' AFTER `remark`',
+  'SELECT 1');
+PREPARE snapshot_stmt FROM @snapshot_column_sql;
+EXECUTE snapshot_stmt;
+DEALLOCATE PREPARE snapshot_stmt;
 
 CREATE TABLE IF NOT EXISTS `sys_oper_log` (
   `id` bigint NOT NULL AUTO_INCREMENT,
