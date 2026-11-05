@@ -1,5 +1,7 @@
 package com.nzxhjy.agri.portal.controller;
 
+import com.nzxhjy.agri.common.enums.ErrorCodeEnum;
+import com.nzxhjy.agri.common.exception.BusinessException;
 import com.nzxhjy.agri.common.model.PageResult;
 import com.nzxhjy.agri.common.model.Result;
 import com.nzxhjy.agri.common.security.UserContext;
@@ -32,8 +34,9 @@ public class PortalFinanceController {
 
     @GetMapping("/wallet/info") public Result<FinanceService.WalletView> walletInfo() { return Result.success(financeService.walletInfo(UserContext.getUserId())); }
     @GetMapping("/wallet/transactions") public Result<PageResult<FinanceService.TransactionView>> transactions(@RequestParam(defaultValue = "1") int pageNum, @RequestParam(defaultValue = "10") int pageSize, @RequestParam(required = false) Integer transType) { return Result.success(financeService.walletTransactions(UserContext.getUserId(), pageNum, Math.min(pageSize, 100), transType)); }
-    @PostMapping("/wallet/deposit") public Result<FinanceService.WalletView> deposit(@Valid @RequestBody AmountRequest request) { return Result.success(financeService.deposit(UserContext.getUserId(), request.amount)); }
-    @PostMapping("/wallet/withdraw") public Result<FinanceService.WalletView> withdraw(@Valid @RequestBody AmountRequest request) { return Result.success(financeService.withdraw(UserContext.getUserId(), request.amount)); }
+    // 钱包支付已下线（改为线下转账），入金/出金属模拟资金操作，一并停用，避免出现无真实资金支撑的充值口。
+    @PostMapping("/wallet/deposit") public Result<Void> deposit() { throw new BusinessException(ErrorCodeEnum.BUSINESS_ERROR.getCode(), "钱包充值已停用，请使用银行转账支付"); }
+    @PostMapping("/wallet/withdraw") public Result<Void> withdraw() { throw new BusinessException(ErrorCodeEnum.BUSINESS_ERROR.getCode(), "钱包提现已停用，请使用银行转账支付"); }
 
     @GetMapping("/invoice-info/list") public Result<java.util.List<FinanceService.InvoiceInfoView>> invoiceInfos() { return Result.success(financeService.invoiceInfos(UserContext.getUserId())); }
     @PostMapping("/invoice-info") public Result<FinanceService.InvoiceInfoView> createInvoiceInfo(@Valid @RequestBody InvoiceInfoRequest request) { return Result.success(financeService.saveInvoiceInfo(UserContext.getUserId(), null, request.titleType, request.title, request.taxNo, request.bankName, request.bankAccount, request.regAddress, request.phone, request.isDefault)); }

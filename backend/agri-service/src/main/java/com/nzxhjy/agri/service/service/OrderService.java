@@ -130,26 +130,50 @@ public class OrderService {
         return detail(order.getId(), userId);
     }
 
+    /**
+     * 下单。改为线下转账模式后不再自动扣款：
+     * 订单停在待付款并返回平台收款账户，买家汇款后上传转账凭证才进入审核。
+     */
     @Transactional
     public PayResult checkout(Long userId, String token, Long addressId, List<ItemCommand> items, String buyerNote) {
-        // 创建订单和钱包支付共用事务，支付失败时回滚库存、购物车和订单。
         OrderView order = create(userId, token, addressId, items, buyerNote);
-        return pay(userId, order.getOrderNo(), "WALLET");
+        return payResult(orderMapper.selectById(order.getId()), "下单成功，请向平台账户转账后上传凭证", true,
+                settlementAccount());
+    }
+
+    /** 平台收款账户，供买家线下汇款；取自银行转账支付实现的配置。 */
+    public SettlementAccount settlementAccount() {
+        return payServices.stream()
+                .filter(PayService::awaitsExternalConfirmation)
+                .map(PayService::settlementAccount)
+                .filter(Objects::nonNull)
+                .findFirst()
+                .orElseThrow(() -> business("平台结算账户未配置，请联系平台"));
     }
 
     @Transactional
+    /**
+     * 登记支付方式（仅银行转账）。
+     *
+     * <p>钱包支付已下线：即使直接调用本接口也不允许走 WALLET，否则可以绕开
+     * "上传转账凭证 → 后台核对到账"的流程白拿订单。登记后订单保持待付款，
+     * 买家汇款并上传凭证才进入审核。</p>
+     */
     public PayResult pay(Long userId, String orderNo, String payMethod) {
         OrderMain order = orderMapper.selectOwnedByNoForUpdate(orderNo, userId);
         if (order == null) throw business("订单不存在");
         if (Integer.valueOf(StatusEnums.PayStatus.PAID.value).equals(order.getPayStatus())) return payResult(order, "订单已支付");
         if (!Integer.valueOf(StatusEnums.OrderStatus.PENDING_PAYMENT.value).equals(order.getOrderStatus())) throw business("当前订单不可支付");
-        String method = payMethod == null ? StatusEnums.PayMethod.WALLET.name() : payMethod.toUpperCase(Locale.ROOT);
+        String method = payMethod == null ? "" : payMethod.toUpperCase(Locale.ROOT);
         PayService payService = requirePayService(method);
+        if (!payService.awaitsExternalConfirmation()) {
+            throw business("该支付方式已停用，请使用银行转账并上传转账凭证");
+        }
         PayOutcome outcome = payService.pay(userId, order);
         if (outcome == PayOutcome.PENDING) {
             // 已发起、等待外部到账确认：只登记支付方式，订单保持待付款。
             order.setPayMethod(method); orderMapper.updateById(order);
-            return payResult(order, "请向平台结算账户完成转账，到账确认后订单生效", true, payService.settlementAccount());
+            return payResult(order, "请向平台结算账户完成转账，上传凭证后等待核对到账", true, payService.settlementAccount());
         }
         markPaidAndStartAudit(order, method);
         return payResult(order, "支付成功");
@@ -169,6 +193,11 @@ public class OrderService {
         PayService payService = order.getPayMethod() == null ? null : payServices.stream()
                 .filter(service -> service.method().equalsIgnoreCase(order.getPayMethod())).findFirst().orElse(null);
         if (payService == null || !payService.awaitsExternalConfirmation()) throw business("该订单无需确认到账");
+        // 主流程要求先有转账凭证再核对到账；无凭证的"空确认"会让订单绕过凭证环节。
+        long vouchers = attachmentMapper.selectCount(Wrappers.<OrderAttachment>lambdaQuery()
+                .eq(OrderAttachment::getOrderId, orderId)
+                .eq(OrderAttachment::getType, StatusEnums.OrderAttachmentType.TRANSFER_VOUCHER.value));
+        if (vouchers == 0) throw business("请先由买家上传转账凭证，再确认到账");
         markPaidAndStartAudit(order, payService.method());
         return payResult(order, "到账已确认，订单进入审核");
     }
@@ -211,7 +240,55 @@ public class OrderService {
         return attachmentMapper.selectList(Wrappers.<OrderAttachment>lambdaQuery().eq(OrderAttachment::getOrderId, orderId).orderByDesc(OrderAttachment::getCreatedAt));
     }
 
-    @Transactional public void addAttachment(Long userId, Long orderId, int type, String fileUrl, String fileName) { OrderMain order = orderMapper.selectById(orderId); if (order == null || !Objects.equals(order.getUserId(), userId)) throw business("订单不存在"); if (type == 1 && order.getOrderStatus() != StatusEnums.OrderStatus.PENDING_RECEIPT.value) throw business("当前订单不可上传回传单"); OrderAttachment a = new OrderAttachment(); a.setOrderId(orderId); a.setType(type); a.setFileUrl(fileUrl); a.setFileName(fileName); a.setUploadedBy(userId); attachmentMapper.insert(a); }
+    /**
+     * 上传转账凭证并发起订单审核。
+     *
+     * <p>线下转账主流程：订单处于待付款 → 买家上传汇款凭证 → 订单转待审核并创建审核任务，
+     * 等待后台核对银行流水。此步<b>不置 pay_status=1</b>，钱是否到账由审核通过时确认。</p>
+     *
+     * <p>重复上传由唯一待办拦截（createOrderAudit 之外的重复提交会命中订单状态校验）。</p>
+     */
+    @Transactional
+    public PayResult uploadTransferVoucher(Long userId, Long orderId, String fileUrl, String fileName) {
+        OrderMain order = orderMapper.selectById(orderId);
+        if (order == null || !Objects.equals(order.getUserId(), userId)) throw business("订单不存在");
+        if (!Integer.valueOf(StatusEnums.OrderStatus.PENDING_PAYMENT.value).equals(order.getOrderStatus())) {
+            throw business("只有待付款订单可以上传转账凭证");
+        }
+        if (fileUrl == null || fileUrl.isBlank()) throw business("请上传转账凭证");
+        OrderAttachment attachment = new OrderAttachment();
+        attachment.setOrderId(orderId);
+        attachment.setType(StatusEnums.OrderAttachmentType.TRANSFER_VOUCHER.value);
+        attachment.setFileUrl(fileUrl);
+        attachment.setFileName(fileName);
+        attachment.setUploadedBy(userId);
+        attachmentMapper.insert(attachment);
+
+        // 登记为银行转账并发起审核；pay_status 仍为未支付，待审核通过确认到账。
+        order.setPayMethod(StatusEnums.PayMethod.BANK_TRANSFER.name());
+        order.setOrderStatus(StatusEnums.OrderStatus.PENDING_AUDIT.value);
+        orderMapper.updateById(order);
+        createOrderAudit(order);
+        return payResult(order, "凭证已提交，等待平台核对到账");
+    }
+
+    @Transactional
+    public void addAttachment(Long userId, Long orderId, int type, String fileUrl, String fileName) {
+        OrderMain order = orderMapper.selectById(orderId);
+        if (order == null || !Objects.equals(order.getUserId(), userId)) throw business("订单不存在");
+        // 门户只允许上传客户盖章回传单；转账凭证走 uploadTransferVoucher，签章发货单仅后台产生。
+        if (type != StatusEnums.OrderAttachmentType.CUSTOMER_RECEIPT.value) throw business("不支持的附件类型");
+        if (!Integer.valueOf(StatusEnums.OrderStatus.PENDING_RECEIPT.value).equals(order.getOrderStatus())) {
+            throw business("当前订单不可上传回传单");
+        }
+        OrderAttachment a = new OrderAttachment();
+        a.setOrderId(orderId);
+        a.setType(type);
+        a.setFileUrl(fileUrl);
+        a.setFileName(fileName);
+        a.setUploadedBy(userId);
+        attachmentMapper.insert(a);
+    }
     public byte[] voucher(Long userId, Long orderId) { OrderView v = detail(orderId, userId); if (v.orderStatus < 1 || v.payStatus != 1) throw business("支付并审核通过后才能下载凭证"); String text = "AGRI TRADING VOUCHER\nOrder: " + v.orderNo + "\nAmount: " + v.payAmount + "\nReceiver: " + v.receiverName + " " + v.receiverAddress; return simplePdf(text); }
 
     public PageResult<OrderView> adminPage(int pageNum, int pageSize, Integer status, String orderNo, Long categoryId) {
@@ -233,9 +310,52 @@ public class OrderService {
             return;
         }
         AuditNode current = auditNodeMapper.selectById(record.getFlowNodeId()); AuditNode next = auditNodeMapper.selectOne(Wrappers.<AuditNode>lambdaQuery().eq(AuditNode::getFlowId, current.getFlowId()).gt(AuditNode::getNodeOrder, current.getNodeOrder()).orderByAsc(AuditNode::getNodeOrder).last("LIMIT 1"));
-        if (next != null) { AuditRecord nextRecord = new AuditRecord(); nextRecord.setBizType(4); nextRecord.setBizId(order.getId()); nextRecord.setBizNo(order.getOrderNo()); nextRecord.setBizSummary("订单审核：" + order.getOrderNo()); nextRecord.setFlowNodeId(next.getId()); nextRecord.setNodeName(next.getNodeName()); nextRecord.setStatus(0); nextRecord.setApplicantId(order.getUserId()); nextRecord.setApplyTime(LocalDateTime.now()); auditRecordMapper.insert(nextRecord); order.setAuditNodeId(next.getId()); orderMapper.updateById(order); }
-        else { order.setOrderStatus(StatusEnums.OrderStatus.PENDING_SHIPMENT.value); orderMapper.updateById(order); }
+        if (next != null) {
+            AuditRecord nextRecord = new AuditRecord();
+            nextRecord.setBizType(StatusEnums.AuditBizType.ORDER.value);
+            nextRecord.setBizId(order.getId());
+            nextRecord.setBizNo(order.getOrderNo());
+            nextRecord.setBizSummary("订单审核：" + order.getOrderNo());
+            nextRecord.setFlowNodeId(next.getId());
+            nextRecord.setNodeName(next.getNodeName());
+            nextRecord.setStatus(StatusEnums.AuditStatus.PENDING.value);
+            nextRecord.setApplicantId(order.getUserId());
+            nextRecord.setApplyTime(LocalDateTime.now());
+            auditRecordMapper.insert(nextRecord);
+            order.setAuditNodeId(next.getId());
+            orderMapper.updateById(order);
+        } else {
+            // 终审通过即视为货款已核对到账：此处才置 pay_status=1 并登记收款台账。
+            confirmPaymentOnAudit(order);
+            order.setOrderStatus(StatusEnums.OrderStatus.PENDING_SHIPMENT.value);
+            orderMapper.updateById(order);
+        }
         notifyAudit(order, "通过", next == null ? "" : "进入" + next.getNodeName());
+    }
+
+    /**
+     * 终审通过时确认到账。
+     *
+     * <p>幂等：已支付的订单不重复登记。同时写一条平台收款台账（类型 7），
+     * 使财务报表能统计到银行转账订单的收入——转账不经钱包，没有这条流水报表就是空的。</p>
+     */
+    private void confirmPaymentOnAudit(OrderMain order) {
+        if (Integer.valueOf(StatusEnums.PayStatus.PAID.value).equals(order.getPayStatus())) return;
+        order.setPayStatus(StatusEnums.PayStatus.PAID.value);
+        order.setPayTime(LocalDateTime.now());
+        if (order.getPayMethod() == null) order.setPayMethod(StatusEnums.PayMethod.BANK_TRANSFER.name());
+        WalletTransaction ledger = new WalletTransaction();
+        ledger.setUserId(order.getUserId());
+        ledger.setOrderId(order.getId());
+        ledger.setTransNo(generateNo("LT"));
+        ledger.setAmount(order.getPayAmount());
+        ledger.setDirection(StatusEnums.WalletDirection.IN.value);
+        ledger.setTransType(StatusEnums.WalletTransactionType.TRANSFER_PAYMENT.value);
+        ledger.setTransStatus(StatusEnums.WalletTransactionStatus.SUCCESS.value);
+        // 记账台账不涉及钱包余额，balance_after 固定为 0。
+        ledger.setBalanceAfter(BigDecimal.ZERO);
+        ledger.setRemark("订单收款（转账）");
+        transactionMapper.insert(ledger);
     }
 
     @Transactional
@@ -244,16 +364,19 @@ public class OrderService {
 
     @Transactional
     public void cancelExpired() {
-        // 等待外部到账确认的订单（如银行转账）不参与超时取消：
-        // 买家可能已汇款，自动取消会造成"款已汇、单已取消"且库存被错误回补。
+        // 已发起转账的订单不参与超时取消：买家可能已汇款，
+        // 自动取消会造成"款已汇、单已取消"且库存被错误回补。
         List<String> awaitingMethods = payServices.stream()
                 .filter(PayService::awaitsExternalConfirmation).map(PayService::method).toList();
+        List<String> excluded = new ArrayList<>(awaitingMethods);
+        // 兜底：只要订单已登记支付方式为银行转账（例如上传凭证后又回退到待付款的极端场景），也一并排除。
+        if (!excluded.contains(StatusEnums.PayMethod.BANK_TRANSFER.name())) {
+            excluded.add(StatusEnums.PayMethod.BANK_TRANSFER.name());
+        }
         var query = Wrappers.<OrderMain>lambdaQuery()
                 .eq(OrderMain::getOrderStatus, StatusEnums.OrderStatus.PENDING_PAYMENT.value)
-                .lt(OrderMain::getCreatedAt, LocalDateTime.now().minusMinutes(30));
-        if (!awaitingMethods.isEmpty()) {
-            query.and(w -> w.isNull(OrderMain::getPayMethod).or().notIn(OrderMain::getPayMethod, awaitingMethods));
-        }
+                .lt(OrderMain::getCreatedAt, LocalDateTime.now().minusMinutes(30))
+                .and(w -> w.isNull(OrderMain::getPayMethod).or().notIn(OrderMain::getPayMethod, excluded));
         List<OrderMain> expired = orderMapper.selectList(query.last("LIMIT 100"));
         for (OrderMain order : expired) {
             cancelAndRestore(order);
@@ -277,13 +400,40 @@ public class OrderService {
                     .setSql("stock = stock + " + d.getQuantity()));
             if (stockUpdated != 1) throw new IllegalStateException("订单 " + order.getOrderNo() + " 的库存回补失败，商品ID=" + d.getProductId());
         }
-        // 仅成功取消订单的事务执行退款，避免重复驳回造成重复入账。
-        if (Integer.valueOf(StatusEnums.PayStatus.PAID.value).equals(order.getPayStatus())
-                && "WALLET".equalsIgnoreCase(order.getPayMethod())) refundToWallet(order);
+        // 仅成功取消订单的事务执行退款登记，避免重复驳回造成重复入账。
+        // 转账订单无法自动退回：置为"待线下退款"并写退款台账，由财务实际汇款后在财务页登记。
+        if (Integer.valueOf(StatusEnums.PayStatus.PAID.value).equals(order.getPayStatus())) {
+            if ("WALLET".equalsIgnoreCase(order.getPayMethod())) {
+                refundToWallet(order);
+            } else {
+                registerPendingOfflineRefund(order);
+            }
+        }
         order.setOrderStatus(StatusEnums.OrderStatus.CANCELLED.value);
         order.setCancelTime(LocalDateTime.now());
         return true;
     }
+    /**
+     * 转账订单在被驳回/取消时的退款登记。
+     *
+     * <p>货款已经通过银行转账收到平台账户，无法原路自动退回。这里写一条支出方向的
+     * 退款台账，使财务报表能看到这笔待退款，同时给买家留下可追溯记录；
+     * 实际打款由财务线下完成。</p>
+     */
+    private void registerPendingOfflineRefund(OrderMain order) {
+        WalletTransaction ledger = new WalletTransaction();
+        ledger.setUserId(order.getUserId());
+        ledger.setOrderId(order.getId());
+        ledger.setTransNo(generateNo("LT"));
+        ledger.setAmount(order.getPayAmount());
+        ledger.setDirection(StatusEnums.WalletDirection.OUT.value);
+        ledger.setTransType(StatusEnums.WalletTransactionType.REFUND.value);
+        ledger.setTransStatus(StatusEnums.WalletTransactionStatus.SUCCESS.value);
+        ledger.setBalanceAfter(BigDecimal.ZERO);
+        ledger.setRemark("订单驳回退款（待线下打款）");
+        transactionMapper.insert(ledger);
+    }
+
     private void refundToWallet(OrderMain order) {
         BigDecimal amount = order.getPayAmount();
         if (amount == null || amount.signum() < 0) throw business("订单实付金额异常，无法退款");
@@ -301,10 +451,42 @@ public class OrderService {
         tx.setBalanceAfter(account.getBalance().add(amount)); tx.setRemark("订单审核驳回退款");
         if (transactionMapper.insert(tx) != 1) throw business("退款流水记录失败");
     }
-    private boolean canAudit(Long userId, AuditRecord record) { if (accessControlService.isSuperAdmin(userId)) return true; AuditNode node = auditNodeMapper.selectById(record.getFlowNodeId()); return node != null && accessControlService.roleIds(userId).contains(node.getRoleId()); }
+    /**
+     * 订单审核的固定审核角色：销售员(3) 与 运营主管(2)。
+     *
+     * <p>订单审核改为一级后，业务要求"销售或主管任一人都能审"。由于流程里只保留一个节点，
+     * 若仅按节点角色判断，另一个角色会被误拒；因此这里对订单业务显式放开这两个角色。</p>
+     */
+    private static final List<Long> ORDER_AUDITOR_ROLE_IDS = List.of(2L, 3L);
+
+    /**
+     * 审核权限：订单业务放行销售/主管任一角色；其余业务仍按节点角色校验。
+     */
+    private boolean canAudit(Long userId, AuditRecord record) {
+        if (accessControlService.isSuperAdmin(userId)) return true;
+        AuditNode node = auditNodeMapper.selectById(record.getFlowNodeId());
+        if (node == null) return false;
+        List<Long> userRoles = accessControlService.roleIds(userId);
+        if (userRoles.isEmpty()) return false;
+        if (Objects.equals(record.getBizType(), StatusEnums.AuditBizType.ORDER.value)) {
+            // 订单审核：销售或主管均可审核。
+            return userRoles.stream().anyMatch(ORDER_AUDITOR_ROLE_IDS::contains);
+        }
+        return userRoles.contains(node.getRoleId());
+    }
     private void notifyAudit(OrderMain order, String result, String remark) { messageService.send(order.getUserId(), "ORDER_AUDIT_RESULT", 4, order.getId(), java.util.Map.of("订单号", order.getOrderNo(), "结果", result, "备注", remark == null ? "" : remark)); }
     private List<OrderDetail> details(Long orderId) { return detailMapper.selectList(Wrappers.<OrderDetail>lambdaQuery().eq(OrderDetail::getOrderId, orderId)); }
-    private OrderView view(OrderMain o) { return new OrderView(o.getId(), o.getOrderNo(), o.getTotalAmount(), o.getPayAmount(), o.getOrderStatus(), o.getPayStatus(), o.getPayMethod(), o.getReceiverName(), o.getReceiverPhone(), o.getReceiverAddress(), o.getSellerNote(), details(o.getId()).stream().map(d -> new DetailView(d.getProductId(), d.getProductName(), d.getCategoryId(), d.getCategoryName(), d.getProductPrice(), d.getQuantity(), d.getTotalPrice(), d.getUnit())).toList()); }
+    private OrderView view(OrderMain o) {
+        return new OrderView(o.getId(), o.getOrderNo(), o.getTotalAmount(), o.getPayAmount(), o.getOrderStatus(),
+                o.getPayStatus(), o.getPayMethod(), o.getReceiverName(), o.getReceiverPhone(), o.getReceiverAddress(),
+                o.getSellerNote(),
+                details(o.getId()).stream().map(d -> new DetailView(d.getProductId(), d.getProductName(),
+                        d.getCategoryId(), d.getCategoryName(), d.getProductPrice(), d.getQuantity(),
+                        d.getTotalPrice(), d.getUnit())).toList(),
+                attachmentMapper.selectList(Wrappers.<OrderAttachment>lambdaQuery()
+                        .eq(OrderAttachment::getOrderId, o.getId())
+                        .orderByAsc(OrderAttachment::getId)));
+    }
     private CartView cartView(ShoppingCart c) { Product p = productMapper.selectById(c.getProductId()); return new CartView(c.getProductId(), p == null ? null : p.getName(), p == null ? null : p.getPrice(), c.getQuantity(), c.getSelected(), p == null ? null : p.getStock(), p == null ? null : p.getImages()); }
     private Product requireOnSale(Long id) { Product p = productMapper.selectById(id); if (p == null || p.getStatus() != StatusEnums.ProductStatus.ON_SALE.value) throw business("商品不存在或已下架"); return p; }
     private ShoppingCart requireCart(Long userId, Long productId) { ShoppingCart c = cartMapper.selectOne(Wrappers.<ShoppingCart>lambdaQuery().eq(ShoppingCart::getUserId, userId).eq(ShoppingCart::getProductId, productId)); if (c == null) throw business("购物车商品不存在"); return c; }
@@ -362,7 +544,22 @@ public class OrderService {
     public record ItemCommand(Long productId, Integer quantity) {}
     @Data @AllArgsConstructor public static class CartView { private Long productId; private String productName; private BigDecimal price; private Integer quantity; private Integer selected; private Integer stock; private String images; }
     @Data @AllArgsConstructor public static class DetailView { private Long productId; private String productName; private Long categoryId; private String categoryName; private BigDecimal productPrice; private Integer quantity; private BigDecimal totalPrice; private String unit; }
-    @Data @AllArgsConstructor public static class OrderView { private Long id; private String orderNo; private BigDecimal totalAmount; private BigDecimal payAmount; private Integer orderStatus; private Integer payStatus; private String payMethod; private String receiverName; private String receiverPhone; private String receiverAddress; private String sellerNote; private List<DetailView> details; }
+    @Data @AllArgsConstructor public static class OrderView {
+        private Long id;
+        private String orderNo;
+        private BigDecimal totalAmount;
+        private BigDecimal payAmount;
+        private Integer orderStatus;
+        private Integer payStatus;
+        private String payMethod;
+        private String receiverName;
+        private String receiverPhone;
+        private String receiverAddress;
+        private String sellerNote;
+        private List<DetailView> details;
+        /** 订单附件：1-盖章回传单 2-签章发货单 3-转账凭证。审核页据此展示凭证。 */
+        private List<OrderAttachment> attachments;
+    }
     @Data @AllArgsConstructor public static class PayResult {
         private boolean success;
         private int orderStatus;

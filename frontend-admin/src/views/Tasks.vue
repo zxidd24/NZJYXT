@@ -119,6 +119,11 @@ function stockCompare() {
 function statusText(value) {
   return ['待审核', '已上架', '已下架', '审核驳回'][value] ?? '-';
 }
+// 转账凭证（附件类型 3）：审核订单时用于核对买家是否真的汇款。
+function vouchers() {
+  const list = detailDialog.value?.bizDetail?.attachments || [];
+  return list.filter((item) => item.type === 3);
+}
 function detailTitle() {
   const t = detailDialog.value?.task;
   if (!t) return "任务详情";
@@ -273,6 +278,18 @@ onMounted(load);
           ><el-descriptions-item label="收货地址">{{
             detailDialog.bizDetail.receiverAddress ?? "-"
           }}</el-descriptions-item
+          ><el-descriptions-item label="转账凭证" :span="2"
+            ><template v-if="vouchers().length"
+              ><el-link
+                v-for="item in vouchers()"
+                :key="item.id"
+                :href="imageUrl(item.fileUrl)"
+                target="_blank"
+                type="primary"
+                style="margin-right: 12px"
+                >{{ item.fileName || "查看凭证" }}</el-link
+              ></template
+            ><span v-else>买家未上传转账凭证</span></el-descriptions-item
           ><el-descriptions-item label="商品明细" :span="2"
             ><el-table :data="detailDialog.bizDetail.details || []" size="small" border
               ><el-table-column prop="productName" label="商品名称" min-width="160" />

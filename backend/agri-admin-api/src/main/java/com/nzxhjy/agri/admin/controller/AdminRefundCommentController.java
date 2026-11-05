@@ -20,6 +20,9 @@ public class AdminRefundCommentController {
     private final FinanceService financeService;
     @GetMapping("/refund/page") public Result<PageResult<FinanceService.RefundView>> refundPage(@RequestParam(defaultValue = "1") int pageNum, @RequestParam(defaultValue = "10") int pageSize, @RequestParam(required = false) Integer status) { return Result.success(financeService.refundPage(pageNum, Math.min(pageSize, 100), status)); }
     @PostMapping("/refund/audit") public Result<Void> auditRefund(@Valid @RequestBody AuditRequest request) { financeService.auditRefund(UserContext.getUserId(), request.id, request.approved, request.remark); return Result.success(); }
+    /** 线下退款登记：财务实际完成汇款后调用，此时才把退款单与订单置为已退款。 */
+    @PostMapping("/refund/{id}/offline-register") public Result<Void> registerOfflineRefund(@PathVariable Long id, @RequestBody(required = false) OfflineRefundRequest request) { financeService.registerOfflineRefund(UserContext.getUserId(), id, request == null ? null : request.remark); return Result.success(); }
     @GetMapping("/comment/page") public Result<PageResult<FinanceService.CommentView>> comments(@RequestParam(required = false) Long productId, @RequestParam(defaultValue = "1") int pageNum, @RequestParam(defaultValue = "10") int pageSize) { return Result.success(financeService.commentPage(productId, pageNum, Math.min(pageSize, 100))); }
     @Data public static class AuditRequest { @NotNull Long id; @NotNull Boolean approved; @Size(max = 255) String remark; }
+    @Data public static class OfflineRefundRequest { @Size(max = 255) String remark; }
 }

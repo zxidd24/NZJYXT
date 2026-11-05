@@ -9,7 +9,7 @@ const { pagination, fetchPage } = usePagination();
 const tab = ref("refund");
 const loading = ref(false);
 const rows = ref([]);
-const statusNames = ["待审核", "同意", "驳回", "已退款"];
+const statusNames = ["待审核", "待打款", "驳回", "已退款"];
 const loanStatusNames = ["申请中", "已放款", "已还款", "驳回"];
 const invoiceStatusNames = ["待开票", "已开票", "驳回"];
 
@@ -28,7 +28,14 @@ async function load() {
   } catch (error) { ElMessage.error(error.message || "加载失败"); }
   finally { loading.value = false; }
 }
-async function auditRefund(row, approved) { const remark = approved ? "" : window.prompt("驳回原因", "资料不完整"); if (!approved && !remark) return; try { await request.post("/api/admin/refund/audit", { id: row.id, approved, remark }); ElMessage.success("处理成功"); await load(); } catch (error) { ElMessage.error(error.message || "处理失败"); } }
+async function auditRefund(row, approved) { const remark = approved ? "" : window.prompt("驳回原因", "资料不完整"); if (!approved && !remark) return; try { await request.post("/api/admin/refund/audit", { id: row.id, approved, remark }); ElMessage.success(approved ? "已同意，请线下打款后登记" : "已驳回"); await load(); } catch (error) { ElMessage.error(error.message || "处理失败"); } }
+// 线下退款登记：财务在银行完成打款后回填，此时退款单与订单才置为已退款。
+async function registerOfflineRefund(row) {
+  const remark = window.prompt("线下退款备注（如流水号）", "线下退款已登记");
+  if (remark === null) return;
+  try { await request.post(`/api/admin/refund/${row.id}/offline-register`, { remark }); ElMessage.success("已登记为已退款"); await load(); }
+  catch (error) { ElMessage.error(error.message || "登记失败"); }
+}
 async function issue(row) { const invoiceNo = window.prompt("发票号码"); if (!invoiceNo) return; try { await request.post(`/api/admin/invoice/${row.id}/issue`, { invoiceNo }); ElMessage.success("已开票"); await load(); } catch (error) { ElMessage.error(error.message || "开票失败"); } }
 async function rejectInvoice(row) { try { await request.post(`/api/admin/invoice/${row.id}/reject`, { remark: window.prompt("驳回原因", "信息有误") || "" }); ElMessage.success("已驳回"); await load(); } catch (error) { ElMessage.error(error.message || "操作失败"); } }
 async function auditLoan(row, approved) { const remark = approved ? "" : window.prompt("驳回原因", "授信资料不符合要求"); if (!approved && !remark) return; try { await request.post(`/api/admin/loan/${row.id}/audit`, { approved, remark }); ElMessage.success("处理成功"); await load(); } catch (error) { ElMessage.error(error.message || "处理失败"); } }
@@ -46,7 +53,7 @@ onMounted(load);
       <el-tab-pane label="退款管理" name="refund" /><el-tab-pane label="评价管理" name="comment" /><el-tab-pane label="账户明细" name="account" /><el-tab-pane label="发票管理" name="invoice" /><el-tab-pane label="贷款服务" name="loan" />
     </el-tabs>
     <el-table :data="rows" v-loading="loading" stripe>
-      <template v-if="tab === 'refund'"><el-table-column prop="refundNo" label="退款单号" min-width="170" /><el-table-column prop="productName" label="商品" /><el-table-column prop="refundAmount" label="退款金额" /><el-table-column prop="reason" label="原因" /><el-table-column label="状态"><template #default="s">{{ statusNames[s.row.status] }}</template></el-table-column><el-table-column label="操作"><template #default="s"><el-button v-if="s.row.status === 0" link type="success" @click="auditRefund(s.row, true)">通过</el-button><el-button v-if="s.row.status === 0" link type="danger" @click="auditRefund(s.row, false)">驳回</el-button></template></el-table-column></template>
+      <template v-if="tab === 'refund'"><el-table-column prop="refundNo" label="退款单号" min-width="170" /><el-table-column prop="productName" label="商品" /><el-table-column prop="orderAmount" label="交易金额" width="110" /><el-table-column prop="refundAmount" label="退款金额" width="110" /><el-table-column prop="reason" label="原因" /><el-table-column label="状态" width="100"><template #default="s">{{ statusNames[s.row.status] }}</template></el-table-column><el-table-column label="操作" width="190"><template #default="s"><el-button v-if="s.row.status === 0" link type="success" @click="auditRefund(s.row, true)">通过</el-button><el-button v-if="s.row.status === 0" link type="danger" @click="auditRefund(s.row, false)">驳回</el-button><el-button v-if="s.row.status === 1" link type="warning" @click="registerOfflineRefund(s.row)">已打款登记</el-button></template></el-table-column></template>
       <template v-else-if="tab === 'comment'"><el-table-column prop="productName" label="商品" /><el-table-column prop="buyerName" label="买家" /><el-table-column prop="score" label="评分" /><el-table-column prop="content" label="评价内容" min-width="280" /></template>
       <template v-else-if="tab === 'account'"><el-table-column prop="transNo" label="流水号" /><el-table-column prop="orderId" label="订单" /><el-table-column prop="amount" label="金额" /><el-table-column prop="direction" label="方向" /><el-table-column prop="transType" label="类型" /><el-table-column prop="createdAt" label="时间" /></template>
       <template v-else-if="tab === 'invoice'"><el-table-column prop="applyNo" label="申请单号" /><el-table-column prop="orderId" label="订单" /><el-table-column prop="amount" label="金额" /><el-table-column label="状态"><template #default="s">{{ invoiceStatusNames[s.row.status] }}</template></el-table-column><el-table-column label="操作"><template #default="s"><el-button v-if="s.row.status === 0" link type="success" @click="issue(s.row)">开票</el-button><el-button v-if="s.row.status === 0" link type="danger" @click="rejectInvoice(s.row)">驳回</el-button></template></el-table-column></template>

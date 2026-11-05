@@ -7,6 +7,7 @@ import com.nzxhjy.agri.common.enums.StatusEnums;
 import com.nzxhjy.agri.common.exception.BusinessException;
 import com.nzxhjy.agri.common.security.AesUtils;
 import com.nzxhjy.agri.service.entity.OrderMain;
+import com.nzxhjy.agri.service.entity.OrderDetail;
 import com.nzxhjy.agri.service.entity.PortalUserInfo;
 import com.nzxhjy.agri.service.entity.LoanRecord;
 import com.nzxhjy.agri.service.entity.RefundApply;
@@ -26,10 +27,12 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.math.BigDecimal;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
@@ -61,6 +64,9 @@ class FinanceServiceTest {
         TableInfoHelper.initTableInfo(
                 new MapperBuilderAssistant(new MybatisConfiguration(), ""),
                 com.nzxhjy.agri.service.entity.WalletTransaction.class);
+        TableInfoHelper.initTableInfo(
+                new MapperBuilderAssistant(new MybatisConfiguration(), ""),
+                com.nzxhjy.agri.service.entity.AuditRecord.class);
     }
 
     @Test
@@ -370,6 +376,116 @@ feature/zzx_1104
         node.setRoleId(roleId);
         node.setNodeName("贷款审核");
         return node;
+    }
+
+    /**
+     * 退款审核通过 ≠ 已退款：只置为"待打款"，不动订单状态、不回补库存，
+     * 实际打款由财务线下完成后登记。
+     */
+    @Test
+    void refundApprovalWaitsForOfflinePayout() {
+        RefundApply refund = pendingRefund(30L);
+        when(refundMapper.selectById(30L)).thenReturn(refund);
+        when(accessControlService.isSuperAdmin(1L)).thenReturn(true);
+        when(auditRecordMapper.selectOne(any())).thenReturn(pendingAuditRecord());
+        when(auditRecordMapper.update(any(), any())).thenReturn(1);
+        OrderMain order = order(39L, StatusEnums.OrderStatus.REFUNDING.value);
+        when(orderMapper.selectById(39L)).thenReturn(order);
+
+        service.auditRefund(1L, 30L, true, "同意退款");
+
+        assertEquals(StatusEnums.RefundStatus.APPROVED.value, refund.getStatus());
+        // 关键：订单还不能置为已退款，库存也不能回补。
+        assertEquals(StatusEnums.OrderStatus.REFUNDING.value, order.getOrderStatus());
+        verify(productMapper, never()).update(any(), any());
+        verifyNoInteractions(walletMapper);
+    }
+
+    /** 线下打款登记后才置为已退款、回补库存并写退款台账。 */
+    @Test
+    void offlineRefundRegistrationCompletesRefund() {
+        RefundApply refund = pendingRefund(31L);
+        refund.setStatus(StatusEnums.RefundStatus.APPROVED.value);
+        when(refundMapper.selectById(31L)).thenReturn(refund);
+        when(refundMapper.updateById(any(RefundApply.class))).thenReturn(1);
+        OrderMain order = order(40L, StatusEnums.OrderStatus.REFUNDING.value);
+        when(orderMapper.selectById(40L)).thenReturn(order);
+        OrderDetail detail = new OrderDetail();
+        detail.setProductId(3L);
+        detail.setQuantity(2);
+        when(detailMapper.selectList(any())).thenReturn(List.of(detail));
+        when(productMapper.update(any(), any())).thenReturn(1);
+
+        service.registerOfflineRefund(1L, 31L, "已打款 流水号 X123");
+
+        assertEquals(StatusEnums.RefundStatus.REFUNDED.value, refund.getStatus());
+        assertEquals(StatusEnums.OrderStatus.REFUNDED.value, order.getOrderStatus());
+        verify(productMapper).update(isNull(), any());
+        ArgumentCaptor<WalletTransaction> captor = ArgumentCaptor.forClass(WalletTransaction.class);
+        verify(transactionMapper).insert(captor.capture());
+        assertEquals(StatusEnums.WalletTransactionType.REFUND.value, captor.getValue().getTransType());
+        assertEquals(StatusEnums.WalletDirection.OUT.value, captor.getValue().getDirection());
+        verify(operLogMapper).insert(any(SysOperLog.class));
+    }
+
+    /** 未审核通过的退款单不能登记打款，避免绕过审核直接退款。 */
+    @Test
+    void offlineRefundRegistrationRejectsUnapprovedRefund() {
+        RefundApply refund = pendingRefund(32L);
+        refund.setStatus(StatusEnums.RefundStatus.PENDING_AUDIT.value);
+        when(refundMapper.selectById(32L)).thenReturn(refund);
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> service.registerOfflineRefund(1L, 32L, "跳过审核"));
+
+        assertEquals("退款单不存在或尚未审核通过", exception.getMessage());
+        verify(refundMapper, never()).updateById(any(RefundApply.class));
+    }
+
+    /** 已退款的单子不能重复登记，避免重复回补库存与重复记账。 */
+    @Test
+    void offlineRefundRegistrationIsIdempotent() {
+        RefundApply refund = pendingRefund(33L);
+        refund.setStatus(StatusEnums.RefundStatus.REFUNDED.value);
+        when(refundMapper.selectById(33L)).thenReturn(refund);
+
+        assertThrows(BusinessException.class, () -> service.registerOfflineRefund(1L, 33L, "重复登记"));
+
+        verify(productMapper, never()).update(any(), any());
+        verifyNoInteractions(transactionMapper);
+    }
+
+    private RefundApply pendingRefund(Long id) {
+        RefundApply refund = new RefundApply();
+        refund.setId(id);
+        refund.setRefundNo("RF" + id);
+        refund.setOrderId(id + 9);
+        refund.setUserId(7L);
+        refund.setOrderAmount(new BigDecimal("10.00"));
+        refund.setRefundAmount(new BigDecimal("10.00"));
+        refund.setRefundChannel("BANK_TRANSFER");
+        refund.setStatus(StatusEnums.RefundStatus.PENDING_AUDIT.value);
+        return refund;
+    }
+
+    private AuditRecord pendingAuditRecord() {
+        AuditRecord record = new AuditRecord();
+        record.setId(90L);
+        record.setBizType(5);
+        record.setStatus(0);
+        record.setFlowNodeId(58L);
+        return record;
+    }
+
+    private OrderMain order(Long id, int status) {
+        OrderMain order = new OrderMain();
+        order.setId(id);
+        order.setUserId(7L);
+        order.setOrderNo("O" + id);
+        order.setOrderStatus(status);
+        order.setPayStatus(1);
+        order.setPayAmount(new BigDecimal("10.00"));
+        return order;
     }
 
     private <T> com.baomidou.mybatisplus.core.metadata.IPage<T> page(java.util.List<T> records) {

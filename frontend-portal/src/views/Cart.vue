@@ -1,7 +1,9 @@
 <script setup>
 import { computed, onMounted, ref } from "vue";
+import { useRouter } from "vue-router";
 import { showToast } from "vant";
 import request from "../api/request";
+const router = useRouter();
 const rows = ref([]); const addresses = ref([]); const addressId = ref(null); const loading = ref(false);
 const submitting = ref(false);
 const selected = computed(() => rows.value.filter((item) => item.selected === 1));
@@ -21,8 +23,9 @@ async function checkout() {
       addressId: addressId.value,
       items: selected.value.map((item) => ({ productId: item.productId, quantity: item.quantity })),
     });
-    showToast("下单支付成功");
-    await load();
+    showToast("下单成功，请转账后上传凭证");
+    // 下单后跳转订单页完成转账凭证上传，不再直接支付。
+    router.push("/orders");
   } catch (e) {
     showToast(e.message || "下单失败");
   } finally {
@@ -32,5 +35,5 @@ async function checkout() {
 onMounted(load);
 </script>
 <template>
-  <section class="cart-page"><van-nav-bar title="购物车" left-arrow @click-left="$router.back()" /><van-loading v-if="loading" /><van-empty v-else-if="!rows.length" description="购物车为空" /><template v-else><van-cell-group inset><van-cell v-for="item in rows" :key="item.productId"><template #title><van-checkbox :model-value="item.selected === 1" @update:model-value="toggleSelection(item, $event)">{{ item.productName }}</van-checkbox></template><template #label><span class="product-price">¥{{ item.price }}</span><van-stepper v-model="item.quantity" :min="1" :max="item.stock || 1" integer @change="update(item)" /></template></van-cell></van-cell-group><van-cell v-if="addresses.length" title="收货地址"><template #value><select v-model="addressId" class="address-select"><option v-for="address in addresses" :key="address.id" :value="address.id">{{ address.receiverName }} {{ address.receiverPhone }} {{ address.detailAddress }}</option></select></template></van-cell><van-cell v-else title="收货地址" value="请先维护收货地址" /><van-submit-bar :price="Number(total) * 100" button-text="提交订单并支付" :loading="submitting" :disabled="submitting" @submit="checkout" /></template></section>
+  <section class="cart-page"><van-nav-bar title="购物车" left-arrow @click-left="$router.back()" /><van-loading v-if="loading" /><van-empty v-else-if="!rows.length" description="购物车为空" /><template v-else><van-cell-group inset><van-cell v-for="item in rows" :key="item.productId"><template #title><van-checkbox :model-value="item.selected === 1" @update:model-value="toggleSelection(item, $event)">{{ item.productName }}</van-checkbox></template><template #label><span class="product-price">¥{{ item.price }}</span><van-stepper v-model="item.quantity" :min="1" :max="item.stock || 1" integer @change="update(item)" /></template></van-cell></van-cell-group><van-cell v-if="addresses.length" title="收货地址"><template #value><select v-model="addressId" class="address-select"><option v-for="address in addresses" :key="address.id" :value="address.id">{{ address.receiverName }} {{ address.receiverPhone }} {{ address.detailAddress }}</option></select></template></van-cell><van-cell v-else title="收货地址" value="请先维护收货地址" /><van-submit-bar :price="Number(total) * 100" button-text="提交订单" :loading="submitting" :disabled="submitting" @submit="checkout" /></template></section>
 </template>
