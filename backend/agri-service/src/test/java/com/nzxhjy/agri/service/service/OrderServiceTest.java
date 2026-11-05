@@ -63,7 +63,6 @@ class OrderServiceTest {
     @Mock PortalUserInfoMapper userInfoMapper;
     @Mock WalletAccountMapper walletMapper;
     @Mock WalletTransactionMapper transactionMapper;
-    @Mock RefundApplyMapper refundMapper;
     @Mock RedisUtils redisUtils;
     @Mock AuditFlowMapper auditFlowMapper;
     @Mock AuditNodeMapper auditNodeMapper;
