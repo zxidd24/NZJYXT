@@ -17,7 +17,17 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.Random;
 
-/** 钱包支付：扣减可用余额并写入资金流水。 */
+/**
+ * 钱包支付 —— <b>已停用</b>。
+ *
+ * <p>业务改为"线下银行转账 + 转账凭证审核"后，钱包支付不再是可用支付方式。
+ * 本实现仍需保留（{@code PayService} 按 method 分发，删掉会导致 WALLET 落入
+ * "支付方式不支持"，语义变成"未知方式"而非"已停用"）。</p>
+ *
+ * <p>真正的拦截点在 {@code OrderService.pay}：只要实现未声明
+ * {@link PayService#awaitsExternalConfirmation()} 为 true，就会被拒绝，
+ * 因此即使有人直接调用接口传 {@code WALLET} 也无法扣款下单。</p>
+ */
 @Service
 @RequiredArgsConstructor
 public class WalletPayService implements PayService {
@@ -31,6 +41,7 @@ public class WalletPayService implements PayService {
         return StatusEnums.PayMethod.WALLET.name();
     }
 
+    /** 已停用，正常流程不会走到这里；保留实现仅用于维持支付方式注册表完整。 */
     @Override
     public PayOutcome pay(Long userId, OrderMain order) {
         BigDecimal amount = order.getPayAmount();

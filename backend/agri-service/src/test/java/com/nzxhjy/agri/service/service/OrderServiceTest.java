@@ -13,6 +13,7 @@ import com.nzxhjy.agri.service.entity.UserAddress;
 import com.nzxhjy.agri.service.entity.OrderDetail;
 import com.nzxhjy.agri.service.entity.OrderMain;
 import com.nzxhjy.agri.service.entity.AuditRecord;
+import com.nzxhjy.agri.service.entity.OrderAttachment;
 import com.nzxhjy.agri.service.entity.AuditFlow;
 import com.nzxhjy.agri.service.entity.AuditNode;
 import com.nzxhjy.agri.service.entity.WalletAccount;
@@ -25,6 +26,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.aop.framework.ProxyFactory;
@@ -125,7 +127,8 @@ class OrderServiceTest {
         BusinessException exception = assertThrows(BusinessException.class,
                 () -> service.pay(7L, order.getOrderNo(), "CREDIT"));
 
-        assertEquals("额度支付暂未开放，请选择其他支付方式", exception.getMessage());
+        // 钱包/额度均已停用，统一由"非外部确认支付方式"拦截。
+        assertEquals("该支付方式已停用，请使用银行转账并上传转账凭证", exception.getMessage());
         // 关键：订单未被标记支付，未创建审核任务，也未产生任何资金动作。
         assertEquals(StatusEnums.PayStatus.UNPAID.value, order.getPayStatus());
         assertEquals(StatusEnums.OrderStatus.PENDING_PAYMENT.value, order.getOrderStatus());
@@ -187,6 +190,8 @@ class OrderServiceTest {
                 StatusEnums.PayStatus.UNPAID.value);
         order.setPayMethod("BANK_TRANSFER");
         when(orderMapper.selectById(11L)).thenReturn(order);
+        // 前置：买家已上传转账凭证。
+        when(attachmentMapper.selectCount(any())).thenReturn(1L);
         AuditFlow flow = new AuditFlow();
         flow.setId(4L);
         when(auditFlowMapper.selectOne(any())).thenReturn(flow);
@@ -251,32 +256,16 @@ class OrderServiceTest {
                 "排除集合应含 BANK_TRANSFER，实际参数=" + wrapper.getParamNameValuePairs());
     }
 
+    /** 钱包支付已下线：任何入口都不应再扣钱包余额。 */
     @Test
-    void walletPaymentReadsAccountWithLockAndRecordsLockedBalance() {
+    void walletPaymentIsNoLongerAccepted() {
         OrderMain order = order(11L, 7L, StatusEnums.OrderStatus.PENDING_PAYMENT.value,
                 StatusEnums.PayStatus.UNPAID.value);
-        WalletAccount account = new WalletAccount();
-        account.setId(3L);
-        account.setUserId(7L);
-        account.setBalance(new BigDecimal("20.00"));
         when(orderMapper.selectOwnedByNoForUpdate(order.getOrderNo(), 7L)).thenReturn(order);
-        when(walletMapper.selectByUserIdForUpdate(7L)).thenReturn(account);
-        when(walletMapper.update(any(), any())).thenReturn(1);
-        AuditFlow flow = new AuditFlow();
-        flow.setId(4L);
-        flow.setBizType(StatusEnums.AuditBizType.ORDER.value);
-        flow.setEnabled(1);
-        AuditNode node = new AuditNode();
-        node.setId(5L);
-        node.setFlowId(flow.getId());
-        node.setNodeOrder(1);
-        when(auditFlowMapper.selectOne(any())).thenReturn(flow);
-        when(auditNodeMapper.selectOne(any())).thenReturn(node);
 
-        service.pay(7L, order.getOrderNo(), "WALLET");
+        assertThrows(BusinessException.class, () -> service.pay(7L, order.getOrderNo(), "WALLET"));
 
-        verify(walletMapper).selectByUserIdForUpdate(7L);
-        verify(transactionMapper).insert(argThat((WalletTransaction tx) -> new BigDecimal("10.00").equals(tx.getBalanceAfter())));
+        verifyNoInteractions(walletMapper, transactionMapper);
     }
 
     @Test
@@ -324,50 +313,46 @@ class OrderServiceTest {
         verify(orderMapper, never()).insert(any(OrderMain.class));
     }
 
+    /** 改为线下转账后，下单不再扣钱包：订单停在待付款并返回平台收款账户。 */
     @Test
-    void checkoutRollsBackWholeTransactionWhenBalanceIsInsufficient() {
-        prepareCheckout(new BigDecimal("9.99"));
+    void checkoutCreatesUnpaidOrderWithoutDebitingWallet() {
+        OrderMain order = prepareCheckout();
         PlatformTransactionManager manager = mock(PlatformTransactionManager.class);
         TransactionStatus status = mock(TransactionStatus.class);
         OrderService checkoutService = transactionalService(manager, status);
 
-        BusinessException exception = assertThrows(BusinessException.class,
-                () -> checkoutService.checkout(7L, "token", 1L, List.of(new OrderService.ItemCommand(3L, 1)), null));
+        OrderService.PayResult result = checkoutService.checkout(7L, "token", 1L,
+                List.of(new OrderService.ItemCommand(3L, 1)), null);
 
-        assertEquals("钱包余额不足", exception.getMessage());
-        // 确认已执行的库存、购物车和订单写入都属于最终回滚的同一个事务。
-        verify(productMapper).update(isNull(), any());
-        verify(cartMapper).delete(any());
-        verify(orderMapper).insert(any(OrderMain.class));
-        verify(manager).rollback(status);
-        verify(manager, never()).commit(any());
+        assertEquals(true, result.isSuccess());
+        assertEquals(true, result.isAwaitingPayment());
+        // 关键：钱一分没动，订单仍未支付、仍待付款。
+        assertEquals(StatusEnums.PayStatus.UNPAID.value, order.getPayStatus());
+        assertEquals(StatusEnums.OrderStatus.PENDING_PAYMENT.value, order.getOrderStatus());
+        assertEquals("6217000000000000", result.getSettlementAccount().accountNo());
         verify(walletMapper, never()).update(any(), any());
         verifyNoInteractions(transactionMapper, auditRecordMapper);
+        verify(manager).commit(status);
     }
 
+    /** 余额为 0 也能下单——转账流程不依赖钱包余额。 */
     @Test
-    void checkoutRollsBackWhenConditionalWalletDebitFails() {
-        prepareCheckout(new BigDecimal("10.00"));
-        PlatformTransactionManager manager = mock(PlatformTransactionManager.class);
-        TransactionStatus status = mock(TransactionStatus.class);
-        OrderService checkoutService = transactionalService(manager, status);
-        when(walletMapper.update(any(), any())).thenReturn(0);
+    void checkoutSucceedsEvenWithZeroWalletBalance() {
+        prepareCheckout();
 
-        assertThrows(BusinessException.class,
-                () -> checkoutService.checkout(7L, "token", 1L, List.of(new OrderService.ItemCommand(3L, 1)), null));
+        OrderService.PayResult result = service.checkout(7L, "token", 1L,
+                List.of(new OrderService.ItemCommand(3L, 1)), null);
 
-        verify(manager).rollback(status);
-        verify(manager, never()).commit(any());
-        verifyNoInteractions(transactionMapper, auditRecordMapper);
+        assertEquals(true, result.isAwaitingPayment());
+        verify(walletMapper, never()).update(any(), any());
     }
 
+    /** 上传转账凭证：写附件、转待审核、建审核任务，但不置已支付。 */
     @Test
-    void checkoutCommitsOnceWhenBalanceExactlyCoversPayment() {
-        OrderMain order = prepareCheckout(new BigDecimal("10.00"));
-        PlatformTransactionManager manager = mock(PlatformTransactionManager.class);
-        TransactionStatus status = mock(TransactionStatus.class);
-        OrderService checkoutService = transactionalService(manager, status);
-        when(walletMapper.update(any(), any())).thenReturn(1);
+    void uploadVoucherMovesOrderToAuditWithoutMarkingPaid() {
+        OrderMain order = order(21L, 7L, StatusEnums.OrderStatus.PENDING_PAYMENT.value,
+                StatusEnums.PayStatus.UNPAID.value);
+        when(orderMapper.selectById(21L)).thenReturn(order);
         AuditFlow flow = new AuditFlow();
         flow.setId(4L);
         AuditNode node = new AuditNode();
@@ -375,36 +360,69 @@ class OrderServiceTest {
         when(auditFlowMapper.selectOne(any())).thenReturn(flow);
         when(auditNodeMapper.selectOne(any())).thenReturn(node);
 
-        OrderService.PayResult result = checkoutService.checkout(7L, "token", 1L,
-                List.of(new OrderService.ItemCommand(3L, 1)), null);
+        OrderService.PayResult result = service.uploadTransferVoucher(7L, 21L, "/uploads/v.jpg", "v.jpg");
 
-        assertEquals(true, result.isSuccess());
         assertEquals(StatusEnums.OrderStatus.PENDING_AUDIT.value, order.getOrderStatus());
-        assertEquals(StatusEnums.PayStatus.PAID.value, order.getPayStatus());
-        verify(productMapper).update(isNull(), any());
-        verify(cartMapper).delete(any());
-        verify(orderMapper).insert(any(OrderMain.class));
-        verify(walletMapper).update(isNull(), any());
-        verify(transactionMapper).insert(argThat((WalletTransaction tx) -> BigDecimal.ZERO.compareTo(tx.getBalanceAfter()) == 0));
-        verify(manager).commit(status);
-        verify(manager, never()).rollback(any());
+        // 关键：钱未确认，pay_status 必须还是未支付。
+        assertEquals(StatusEnums.PayStatus.UNPAID.value, order.getPayStatus());
+        assertEquals(StatusEnums.PayMethod.BANK_TRANSFER.name(), order.getPayMethod());
+        ArgumentCaptor<OrderAttachment> attachmentCaptor = ArgumentCaptor.forClass(OrderAttachment.class);
+        verify(attachmentMapper).insert(attachmentCaptor.capture());
+        assertEquals(StatusEnums.OrderAttachmentType.TRANSFER_VOUCHER.value, attachmentCaptor.getValue().getType());
+        assertEquals("/uploads/v.jpg", attachmentCaptor.getValue().getFileUrl());
+        verify(auditRecordMapper).insert(any(AuditRecord.class));
+        // 凭证已提交，不再处于"等待买家付款"状态。
+        assertEquals(false, result.isAwaitingPayment());
+        verifyNoInteractions(walletMapper, transactionMapper);
     }
 
+    /** 只能对本人订单上传凭证。 */
     @Test
-    void checkoutRollsBackPaymentWhenAuditCreationFails() {
-        prepareCheckout(new BigDecimal("20.00"));
-        PlatformTransactionManager manager = mock(PlatformTransactionManager.class);
-        TransactionStatus status = mock(TransactionStatus.class);
-        OrderService checkoutService = transactionalService(manager, status);
-        when(walletMapper.update(any(), any())).thenReturn(1);
+    void uploadVoucherRejectsOtherUsersOrder() {
+        when(orderMapper.selectById(22L)).thenReturn(order(22L, 8L,
+                StatusEnums.OrderStatus.PENDING_PAYMENT.value, StatusEnums.PayStatus.UNPAID.value));
+
+        assertThrows(BusinessException.class,
+                () -> service.uploadTransferVoucher(7L, 22L, "/uploads/v.jpg", "v.jpg"));
+
+        verify(attachmentMapper, never()).insert(any(OrderAttachment.class));
+    }
+
+    /** 非待付款状态不能上传凭证，避免重复发起审核。 */
+    @Test
+    void uploadVoucherRejectsNonPendingPaymentOrder() {
+        when(orderMapper.selectById(23L)).thenReturn(order(23L, 7L,
+                StatusEnums.OrderStatus.PENDING_AUDIT.value, StatusEnums.PayStatus.UNPAID.value));
 
         BusinessException exception = assertThrows(BusinessException.class,
-                () -> checkoutService.checkout(7L, "token", 1L, List.of(new OrderService.ItemCommand(3L, 1)), null));
+                () -> service.uploadTransferVoucher(7L, 23L, "/uploads/v.jpg", "v.jpg"));
 
-        assertEquals("订单审核流程未配置", exception.getMessage());
-        verify(transactionMapper).insert(any(WalletTransaction.class));
-        verify(manager).rollback(status);
-        verify(manager, never()).commit(any());
+        assertEquals("只有待付款订单可以上传转账凭证", exception.getMessage());
+    }
+
+    /** 凭证文件为空必须拒绝。 */
+    @Test
+    void uploadVoucherRejectsBlankFile() {
+        when(orderMapper.selectById(24L)).thenReturn(order(24L, 7L,
+                StatusEnums.OrderStatus.PENDING_PAYMENT.value, StatusEnums.PayStatus.UNPAID.value));
+
+        assertThrows(BusinessException.class,
+                () -> service.uploadTransferVoucher(7L, 24L, "  ", "v.jpg"));
+
+        verify(attachmentMapper, never()).insert(any(OrderAttachment.class));
+    }
+
+    /** 门户只允许上传盖章回传单，转账凭证不能走通用附件接口。 */
+    @Test
+    void addAttachmentRejectsTransferVoucherType() {
+        when(orderMapper.selectById(25L)).thenReturn(order(25L, 7L,
+                StatusEnums.OrderStatus.PENDING_PAYMENT.value, StatusEnums.PayStatus.UNPAID.value));
+
+        assertThrows(BusinessException.class,
+                () -> service.addAttachment(7L, 25L, StatusEnums.OrderAttachmentType.TRANSFER_VOUCHER.value,
+                        "/uploads/x.jpg", "x.jpg"));
+
+        verify(attachmentMapper, never()).insert(any(OrderAttachment.class));
     }
 
     @ParameterizedTest
@@ -500,16 +518,26 @@ class OrderServiceTest {
         verifyNoInteractions(productMapper, walletMapper, transactionMapper, messageService);
     }
 
-    @ParameterizedTest
-    @ValueSource(strings = {"BANK_TRANSFER", "CREDIT"})
-    void rejectionDoesNotCreditWalletForOtherPaymentMethods(String method) {
-        prepareRejection(5L, method);
+    /**
+     * 转账订单被驳回：钱已收到平台账户，无法自动退回，
+     * 必须写一条"待线下打款"的退款台账，便于财务跟进与报表体现。
+     */
+    @Test
+    void rejectionOfTransferOrderRecordsPendingOfflineRefund() {
+        prepareRejection(5L, "BANK_TRANSFER");
         prepareRestoredStock();
 
         service.auditOrder(9L, 21L, false, "审核不通过");
 
         verify(productMapper).update(isNull(), any());
-        verifyNoInteractions(walletMapper, transactionMapper);
+        // 不碰钱包余额，但必须留下退款台账。
+        verifyNoInteractions(walletMapper);
+        ArgumentCaptor<WalletTransaction> captor = ArgumentCaptor.forClass(WalletTransaction.class);
+        verify(transactionMapper).insert(captor.capture());
+        WalletTransaction ledger = captor.getValue();
+        assertEquals(StatusEnums.WalletTransactionType.REFUND.value, ledger.getTransType());
+        assertEquals(StatusEnums.WalletDirection.OUT.value, ledger.getDirection());
+        assertEquals("订单驳回退款（待线下打款）", ledger.getRemark());
     }
 
     @Test
@@ -524,6 +552,192 @@ class OrderServiceTest {
 
         assertEquals(StatusEnums.OrderStatus.PENDING_SHIPMENT.value, order.getOrderStatus());
         verifyNoInteractions(productMapper, walletMapper, transactionMapper);
+    }
+
+    /**
+     * 订单审核终审通过 = 货款核对到账：
+     * 必须置 pay_status=1、记录到账时间，并写一条收款台账让财务报表可见。
+     */
+    @Test
+    void finalAuditApprovalConfirmsPaymentAndRecordsLedger() {
+        AuditRecord record = new AuditRecord();
+        record.setId(31L);
+        record.setBizType(StatusEnums.AuditBizType.ORDER.value);
+        record.setBizId(11L);
+        record.setFlowNodeId(5L);
+        when(auditRecordMapper.selectById(31L)).thenReturn(record);
+        when(accessControlService.isSuperAdmin(9L)).thenReturn(true);
+        when(auditRecordMapper.update(any(), any())).thenReturn(1);
+        OrderMain order = order(11L, 7L, StatusEnums.OrderStatus.PENDING_AUDIT.value,
+                StatusEnums.PayStatus.UNPAID.value);
+        order.setPayMethod("BANK_TRANSFER");
+        when(orderMapper.selectById(11L)).thenReturn(order);
+        AuditNode current = new AuditNode();
+        current.setId(5L);
+        current.setFlowId(4L);
+        current.setNodeOrder(1);
+        when(auditNodeMapper.selectById(5L)).thenReturn(current);
+        // 流程只有一个节点 → next 为 null，走终审分支。
+        when(auditNodeMapper.selectOne(any())).thenReturn(null);
+
+        service.auditOrder(9L, 31L, true, null);
+
+        assertEquals(StatusEnums.OrderStatus.PENDING_SHIPMENT.value, order.getOrderStatus());
+        assertEquals(StatusEnums.PayStatus.PAID.value, order.getPayStatus());
+        assertTrue(order.getPayTime() != null, "到账时间必须记录");
+        ArgumentCaptor<WalletTransaction> captor = ArgumentCaptor.forClass(WalletTransaction.class);
+        verify(transactionMapper).insert(captor.capture());
+        WalletTransaction ledger = captor.getValue();
+        assertEquals(StatusEnums.WalletTransactionType.TRANSFER_PAYMENT.value, ledger.getTransType());
+        assertEquals(StatusEnums.WalletDirection.IN.value, ledger.getDirection());
+        // 记账台账不动钱包余额。
+        assertEquals(0, BigDecimal.ZERO.compareTo(ledger.getBalanceAfter()));
+        verifyNoInteractions(walletMapper);
+    }
+
+    /** 终审通过但订单已是已支付（异常重复）时不重复记账。 */
+    @Test
+    void finalAuditApprovalIsIdempotentWhenAlreadyPaid() {
+        AuditRecord record = new AuditRecord();
+        record.setId(32L);
+        record.setBizType(StatusEnums.AuditBizType.ORDER.value);
+        record.setBizId(11L);
+        record.setFlowNodeId(5L);
+        when(auditRecordMapper.selectById(32L)).thenReturn(record);
+        when(accessControlService.isSuperAdmin(9L)).thenReturn(true);
+        when(auditRecordMapper.update(any(), any())).thenReturn(1);
+        OrderMain order = order(11L, 7L, StatusEnums.OrderStatus.PENDING_AUDIT.value,
+                StatusEnums.PayStatus.PAID.value);
+        when(orderMapper.selectById(11L)).thenReturn(order);
+        AuditNode current = new AuditNode();
+        current.setId(5L);
+        current.setFlowId(4L);
+        current.setNodeOrder(1);
+        when(auditNodeMapper.selectById(5L)).thenReturn(current);
+        when(auditNodeMapper.selectOne(any())).thenReturn(null);
+
+        service.auditOrder(9L, 32L, true, null);
+
+        verifyNoInteractions(transactionMapper);
+    }
+
+    /** 多节点流程：非终审节点只建下一节点，不得提前确认到账。 */
+    @Test
+    void intermediateAuditNodeDoesNotConfirmPayment() {
+        AuditRecord record = new AuditRecord();
+        record.setId(33L);
+        record.setBizType(StatusEnums.AuditBizType.ORDER.value);
+        record.setBizId(11L);
+        record.setFlowNodeId(5L);
+        when(auditRecordMapper.selectById(33L)).thenReturn(record);
+        when(accessControlService.isSuperAdmin(9L)).thenReturn(true);
+        when(auditRecordMapper.update(any(), any())).thenReturn(1);
+        OrderMain order = order(11L, 7L, StatusEnums.OrderStatus.PENDING_AUDIT.value,
+                StatusEnums.PayStatus.UNPAID.value);
+        when(orderMapper.selectById(11L)).thenReturn(order);
+        AuditNode current = new AuditNode();
+        current.setId(5L);
+        current.setFlowId(4L);
+        current.setNodeOrder(1);
+        when(auditNodeMapper.selectById(5L)).thenReturn(current);
+        AuditNode next = new AuditNode();
+        next.setId(6L);
+        next.setFlowId(4L);
+        next.setNodeName("主管审核");
+        next.setNodeOrder(2);
+        when(auditNodeMapper.selectOne(any())).thenReturn(next);
+
+        service.auditOrder(9L, 33L, true, "进入下一节点");
+
+        // 还在流程中：订单仍待审核、仍未支付。
+        assertEquals(StatusEnums.OrderStatus.PENDING_AUDIT.value, order.getOrderStatus());
+        assertEquals(StatusEnums.PayStatus.UNPAID.value, order.getPayStatus());
+        verifyNoInteractions(transactionMapper);
+        verify(auditRecordMapper).insert(any(AuditRecord.class));
+    }
+
+    /** 订单审核改为一级：持有流程任一节点角色即可审核（销售或主管都能审）。 */
+    @Test
+    void orderAuditAllowsAnyRoleInFlow() {
+        AuditRecord record = new AuditRecord();
+        record.setId(34L);
+        record.setBizType(StatusEnums.AuditBizType.ORDER.value);
+        record.setBizId(11L);
+        record.setFlowNodeId(5L);
+        when(auditRecordMapper.selectById(34L)).thenReturn(record);
+        when(accessControlService.isSuperAdmin(8L)).thenReturn(false);
+        when(accessControlService.roleIds(8L)).thenReturn(List.of(3L));
+        AuditNode current = new AuditNode();
+        current.setId(5L);
+        current.setFlowId(4L);
+        current.setNodeOrder(1);
+        current.setRoleId(2L);
+        when(auditNodeMapper.selectById(5L)).thenReturn(current);
+        when(auditRecordMapper.update(any(), any())).thenReturn(1);
+        OrderMain order = order(11L, 7L, StatusEnums.OrderStatus.PENDING_AUDIT.value,
+                StatusEnums.PayStatus.UNPAID.value);
+        when(orderMapper.selectById(11L)).thenReturn(order);
+        when(auditNodeMapper.selectOne(any())).thenReturn(null);
+
+        // 销售员(role 3)虽不是当前节点角色(role 2)，但订单审核允许销售/主管任一人审核。
+        service.auditOrder(8L, 34L, true, null);
+
+        assertEquals(StatusEnums.OrderStatus.PENDING_SHIPMENT.value, order.getOrderStatus());
+    }
+
+    /** 完全不属于该流程的角色仍然不能审核。 */
+    @Test
+    void orderAuditRejectsRoleOutsideFlow() {
+        AuditRecord record = new AuditRecord();
+        record.setId(35L);
+        record.setBizType(StatusEnums.AuditBizType.ORDER.value);
+        record.setBizId(11L);
+        record.setFlowNodeId(5L);
+        when(auditRecordMapper.selectById(35L)).thenReturn(record);
+        when(accessControlService.isSuperAdmin(8L)).thenReturn(false);
+        when(accessControlService.roleIds(8L)).thenReturn(List.of(4L));
+        AuditNode current = new AuditNode();
+        current.setId(5L);
+        current.setFlowId(4L);
+        current.setNodeOrder(1);
+        current.setRoleId(2L);
+        when(auditNodeMapper.selectById(5L)).thenReturn(current);
+
+        // 客服(role 4)既非销售也非主管，无订单审核权。
+        assertThrows(BusinessException.class, () -> service.auditOrder(8L, 35L, true, null));
+
+        verify(auditRecordMapper, never()).update(any(), any());
+    }
+
+    /** 钱包支付已下线：直连 pay 接口传 WALLET 也必须被拒，不能绕过转账流程。 */
+    @Test
+    void payRejectsWalletMethodSinceItIsRetired() {
+        OrderMain order = order(41L, 7L, StatusEnums.OrderStatus.PENDING_PAYMENT.value,
+                StatusEnums.PayStatus.UNPAID.value);
+        when(orderMapper.selectOwnedByNoForUpdate(order.getOrderNo(), 7L)).thenReturn(order);
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> service.pay(7L, order.getOrderNo(), "WALLET"));
+
+        assertEquals("该支付方式已停用，请使用银行转账并上传转账凭证", exception.getMessage());
+        assertEquals(StatusEnums.PayStatus.UNPAID.value, order.getPayStatus());
+        verifyNoInteractions(walletMapper, transactionMapper, auditRecordMapper);
+    }
+
+    /** 未上传凭证时不允许"确认到账"，否则会绕过凭证环节。 */
+    @Test
+    void confirmReceivedRequiresTransferVoucher() {
+        OrderMain order = order(42L, 7L, StatusEnums.OrderStatus.PENDING_PAYMENT.value,
+                StatusEnums.PayStatus.UNPAID.value);
+        order.setPayMethod("BANK_TRANSFER");
+        when(orderMapper.selectById(42L)).thenReturn(order);
+        when(attachmentMapper.selectCount(any())).thenReturn(0L);
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> service.confirmBankTransferReceived(42L));
+
+        assertEquals("请先由买家上传转账凭证，再确认到账", exception.getMessage());
+        verify(auditRecordMapper, never()).insert(any(AuditRecord.class));
     }
 
     private OrderMain prepareRejection(Long nodeId, String method) {
@@ -570,7 +784,7 @@ class OrderServiceTest {
         return (OrderService) factory.getProxy();
     }
 
-    private OrderMain prepareCheckout(BigDecimal balance) {
+    private OrderMain prepareCheckout() {
         when(redisUtils.get("agri:order:token:token")).thenReturn("7");
         PortalUserInfo info = new PortalUserInfo();
         info.setAuthStatus(StatusEnums.AuthStatus.VERIFIED.value);
@@ -592,12 +806,7 @@ class OrderServiceTest {
             return 1;
         });
         when(orderMapper.selectById(11L)).thenReturn(order);
-        when(orderMapper.selectOwnedByNoForUpdate(order.getOrderNo(), 7L)).thenReturn(order);
-        WalletAccount account = new WalletAccount();
-        account.setId(3L);
-        account.setUserId(7L);
-        account.setBalance(balance);
-        when(walletMapper.selectByUserIdForUpdate(7L)).thenReturn(account);
+        // 线下转账流程不再读写钱包，此处不再打钱包桩。
         return order;
     }
 

@@ -12,6 +12,7 @@ public final class StatusEnums {
         public final int value; ProductStatus(int value) { this.value = value; } }
     public enum AuthStatus { UNAUTHENTICATED(0), REVIEWING(1), VERIFIED(2), REJECTED(3);
         public final int value; AuthStatus(int value) { this.value = value; } }
+    /** 0-待审核 1-已通过（待财务线下打款） 2-已驳回 3-已退款（线下打款完成）。 */
     public enum RefundStatus { PENDING_AUDIT(0), APPROVED(1), REJECTED(2), REFUNDED(3);
         public final int value; RefundStatus(int value) { this.value = value; } }
     public enum LoanStatus { APPLYING(0), RELEASED(1), REPAID(2), REJECTED(3);
@@ -22,11 +23,16 @@ public final class StatusEnums {
         public final int value; AuditStatus(int value) { this.value = value; } }
     public enum AuditBizType { AUTH(1), PRODUCT_SHELF(2), PRODUCT_PRICE_STOCK(3), ORDER(4), REFUND(5), LOAN(6);
         public final int value; AuditBizType(int value) { this.value = value; } }
-    /** 流水类型。5-贷款放款、6-贷款还款为受托支付口径的记账流水，不改变钱包余额。 */
-    public enum WalletTransactionType { DEPOSIT(1), WITHDRAW(2), PAYMENT(3), REFUND(4), LOAN_RELEASE(5), LOAN_REPAY(6);
+    /**
+     * 流水类型。作为平台资金台账使用，不代表用户钱包余额。
+     * 5-贷款放款、6-贷款还款为受托支付口径的记账流水；7-转账收款为银行转账订单到账记账。
+     * 这三类 balance_after 恒为 0，不改变任何钱包余额。
+     */
+    public enum WalletTransactionType { DEPOSIT(1), WITHDRAW(2), PAYMENT(3), REFUND(4), LOAN_RELEASE(5), LOAN_REPAY(6), TRANSFER_PAYMENT(7);
         public final int value; WalletTransactionType(int value) { this.value = value; } }
     public enum WalletDirection { IN(1), OUT(2); public final int value; WalletDirection(int value) { this.value = value; } }
-    public enum OrderAttachmentType { CUSTOMER_RECEIPT(1), SIGNED_DELIVERY(2);
+    /** 1-客户盖章回传单 2-签章发货单 3-转账凭证（买家线下汇款后上传）。 */
+    public enum OrderAttachmentType { CUSTOMER_RECEIPT(1), SIGNED_DELIVERY(2), TRANSFER_VOUCHER(3);
         public final int value; OrderAttachmentType(int value) { this.value = value; } }
     public enum WalletTransactionStatus { PROCESSING(0), SUCCESS(1), FAILED(2);
         public final int value; WalletTransactionStatus(int value) { this.value = value; } }

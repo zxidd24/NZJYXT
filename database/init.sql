@@ -185,7 +185,7 @@ CREATE TABLE IF NOT EXISTS `order_detail` (
 CREATE TABLE IF NOT EXISTS `order_attachment` (
   `id` bigint NOT NULL AUTO_INCREMENT,
   `order_id` bigint NOT NULL,
-  `type` tinyint NOT NULL COMMENT '1-客户盖章回传单 2-签章发货单',
+  `type` tinyint NOT NULL COMMENT '1-客户盖章回传单 2-签章发货单 3-转账凭证',
   `file_url` varchar(255) NOT NULL,
   `file_name` varchar(100) DEFAULT NULL,
   `uploaded_by` bigint DEFAULT NULL,
@@ -529,10 +529,30 @@ INSERT INTO `audit_flow` (`id`,`biz_type`,`flow_name`) VALUES
   (4,4,'订单审核'),(5,5,'退款审核'),(6,6,'贷款审核')
 ON DUPLICATE KEY UPDATE `flow_name`=VALUES(`flow_name`), `enabled`=1;
 
-INSERT INTO `audit_node` (`flow_id`,`node_name`,`role_id`,`node_order`) VALUES
-  (1,'认证审核',2,1),(2,'上架审核',2,1),(3,'量价审核',2,1),
-  (4,'销售审核',3,1),(4,'主管审核',2,2),(5,'退款审核',2,1),(6,'贷款审核',2,1)
-ON DUPLICATE KEY UPDATE `node_name`=VALUES(`node_name`), `role_id`=VALUES(`role_id`);
+-- 订单审核已改为一级：销售(role 3)或主管(role 2)任一人都可审核。
+-- audit_node 没有唯一键，ON DUPLICATE KEY 不会生效，故用"仅当该流程无节点时插入"保证幂等，
+-- 并单独删除历史上种子写入的两级订单节点，避免升级后仍然两级审批。
+DELETE FROM `audit_node`
+WHERE `flow_id` = 4 AND `node_name` IN ('销售审核', '主管审核');
+
+INSERT INTO `audit_node` (`flow_id`,`node_name`,`role_id`,`node_order`)
+SELECT 1,'认证审核',2,1 FROM DUAL
+WHERE NOT EXISTS (SELECT 1 FROM `audit_node` WHERE `flow_id`=1);
+INSERT INTO `audit_node` (`flow_id`,`node_name`,`role_id`,`node_order`)
+SELECT 2,'上架审核',2,1 FROM DUAL
+WHERE NOT EXISTS (SELECT 1 FROM `audit_node` WHERE `flow_id`=2);
+INSERT INTO `audit_node` (`flow_id`,`node_name`,`role_id`,`node_order`)
+SELECT 3,'量价审核',2,1 FROM DUAL
+WHERE NOT EXISTS (SELECT 1 FROM `audit_node` WHERE `flow_id`=3);
+INSERT INTO `audit_node` (`flow_id`,`node_name`,`role_id`,`node_order`)
+SELECT 4,'订单审核',2,1 FROM DUAL
+WHERE NOT EXISTS (SELECT 1 FROM `audit_node` WHERE `flow_id`=4);
+INSERT INTO `audit_node` (`flow_id`,`node_name`,`role_id`,`node_order`)
+SELECT 5,'退款审核',2,1 FROM DUAL
+WHERE NOT EXISTS (SELECT 1 FROM `audit_node` WHERE `flow_id`=5);
+INSERT INTO `audit_node` (`flow_id`,`node_name`,`role_id`,`node_order`)
+SELECT 6,'贷款审核',2,1 FROM DUAL
+WHERE NOT EXISTS (SELECT 1 FROM `audit_node` WHERE `flow_id`=6);
 
 INSERT INTO `message_config` (`code`,`title`,`content_template`) VALUES
   ('AUTH_RESULT','实名认证结果','您的实名认证已{结果}。{备注}'),

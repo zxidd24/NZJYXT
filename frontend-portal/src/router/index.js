@@ -12,7 +12,6 @@ const router = createRouter({
     { path: "/profile", component: () => import("../views/Profile.vue") },
     { path: "/addresses", component: () => import("../views/Addresses.vue") },
     { path: "/password", component: () => import("../views/Password.vue") },
-    { path: "/wallet", component: () => import("../views/Wallet.vue") },
     { path: "/invoice", component: () => import("../views/Invoice.vue") },
     { path: "/loan", component: () => import("../views/Loan.vue") },
     { path: "/article/:id", component: () => import("../views/ArticleDetail.vue") },

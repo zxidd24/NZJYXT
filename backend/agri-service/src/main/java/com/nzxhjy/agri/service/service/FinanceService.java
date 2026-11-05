@@ -113,13 +113,70 @@ public class FinanceService {
             messageService.send(refund.getUserId(), "REFUND_RESULT", 5, refund.getId(), java.util.Map.of("订单号", order == null ? "" : order.getOrderNo(), "结果", "驳回", "备注", remark == null ? "" : remark));
             return;
         }
-        refund.setStatus(StatusEnums.RefundStatus.REFUNDED.value); refund.setAuditTime(now); refund.setAuditorId(adminId);
-        String channel = refund.getRefundChannel();
-        if ("WALLET".equalsIgnoreCase(channel)) creditWallet(refund.getUserId(), refund.getOrderId(), refund.getRefundAmount(), "订单退款");
-        else refund.setRemark("待线下退款，已登记原路退款");
+        // 审核通过 = 同意退款，但钱还没打出去：置为"已通过（待线下打款）"，
+        // 由财务实际汇款后调用 registerOfflineRefund 登记并把订单置为已退款。
+        refund.setStatus(StatusEnums.RefundStatus.APPROVED.value);
+        refund.setAuditTime(now);
+        refund.setAuditorId(adminId);
+        refund.setRemark(trim(remark, 255));
         refundMapper.updateById(refund);
-        if (order != null) { restoreStock(order.getId()); order.setOrderStatus(StatusEnums.OrderStatus.REFUNDED.value); orderMapper.updateById(order); }
-        messageService.send(refund.getUserId(), "REFUND_RESULT", 5, refund.getId(), java.util.Map.of("订单号", order == null ? "" : order.getOrderNo(), "结果", "通过", "备注", "金额" + refund.getRefundAmount() + "元"));
+        // 库存回补与订单终态推迟到实际打款登记时执行，避免"未退钱先回补库存"。
+        messageService.send(refund.getUserId(), "REFUND_RESULT", 5, refund.getId(),
+                java.util.Map.of("订单号", order == null ? "" : order.getOrderNo(), "结果", "通过",
+                        "备注", "退款金额" + refund.getRefundAmount() + "元，平台将尽快安排打款"));
+    }
+
+    /**
+     * 线下退款登记：财务实际完成打款后调用。
+     *
+     * <p>转账订单无法原路自动退款，必须由财务在银行完成汇款后回填登记。此步才把退款单置为
+     * "已退款"、订单置为"已退款"并回补库存，保证系统状态与真实资金动作一致。</p>
+     */
+    @Transactional
+    public void registerOfflineRefund(Long adminId, Long refundId, String remark) {
+        RefundApply refund = refundMapper.selectById(refundId);
+        if (refund == null || !Objects.equals(refund.getStatus(), StatusEnums.RefundStatus.APPROVED.value)) {
+            throw business("退款单不存在或尚未审核通过");
+        }
+        if (adminId == null) throw new BusinessException(ErrorCodeEnum.FORBIDDEN.getCode(), ErrorCodeEnum.FORBIDDEN.getMessage());
+        LocalDateTime now = LocalDateTime.now();
+        refund.setStatus(StatusEnums.RefundStatus.REFUNDED.value);
+        refund.setRemark(trim(remark == null || remark.isBlank() ? "线下退款已登记" : remark, 255));
+        if (refundMapper.updateById(refund) != 1) throw business("退款登记失败");
+        OrderMain order = orderMapper.selectById(refund.getOrderId());
+        if (order != null) {
+            restoreStock(order.getId());
+            order.setOrderStatus(StatusEnums.OrderStatus.REFUNDED.value);
+            orderMapper.updateById(order);
+            // 退款支出计入平台台账（方向支出），使财务报表可见退款金额。
+            WalletTransaction ledger = new WalletTransaction();
+            ledger.setUserId(refund.getUserId());
+            ledger.setOrderId(order.getId());
+            ledger.setTransNo(generateNo("LT"));
+            ledger.setAmount(refund.getRefundAmount());
+            ledger.setDirection(StatusEnums.WalletDirection.OUT.value);
+            ledger.setTransType(StatusEnums.WalletTransactionType.REFUND.value);
+            ledger.setTransStatus(StatusEnums.WalletTransactionStatus.SUCCESS.value);
+            ledger.setBalanceAfter(BigDecimal.ZERO);
+            ledger.setRemark("订单退款（线下打款）");
+            transactionMapper.insert(ledger);
+        }
+        writeRefundOperLog(adminId, refund);
+        messageService.send(refund.getUserId(), "REFUND_RESULT", 5, refund.getId(),
+                java.util.Map.of("订单号", order == null ? "" : order.getOrderNo(), "结果", "完成",
+                        "备注", "退款金额" + refund.getRefundAmount() + "元已线下打款"));
+    }
+
+    private void writeRefundOperLog(Long operatorId, RefundApply refund) {
+        SysOperLog log = new SysOperLog();
+        log.setOperatorId(operatorId);
+        log.setModule("财务管理");
+        log.setAction("线下退款登记");
+        log.setTargetType("refund_apply");
+        log.setTargetId(String.valueOf(refund.getId()));
+        log.setDetail(String.format("{\"refundNo\":\"%s\",\"amount\":%s}",
+                refund.getRefundNo(), defaultAmount(refund.getRefundAmount()).toPlainString()));
+        operLogMapper.insert(log);
     }
 
     @Transactional
@@ -140,10 +197,14 @@ public class FinanceService {
 
     public WalletView walletInfo(Long userId) { return walletView(account(userId)); }
 
-    /** 贷款放款/还款为受托支付口径的记账流水，不改变钱包余额，也不出现在钱包流水中。 */
-    private static final List<Integer> LOAN_TRANS_TYPES = List.of(
+    /**
+     * 平台记账流水：贷款放款/还款、转账收款。它们进财务报表，但不代表用户钱包余额变动，
+     * 因此必须从门户钱包流水中排除，否则用户会看到"扣款/入账"却余额没变。
+     */
+    private static final List<Integer> LEDGER_ONLY_TRANS_TYPES = List.of(
             StatusEnums.WalletTransactionType.LOAN_RELEASE.value,
-            StatusEnums.WalletTransactionType.LOAN_REPAY.value);
+            StatusEnums.WalletTransactionType.LOAN_REPAY.value,
+            StatusEnums.WalletTransactionType.TRANSFER_PAYMENT.value);
 
     public PageResult<TransactionView> transactions(Long userId, int pageNum, int pageSize, Integer transType) {
         IPage<WalletTransaction> page = transactionMapper.selectPage(new Page<>(pageNum, pageSize), Wrappers.<WalletTransaction>lambdaQuery().eq(userId != null, WalletTransaction::getUserId, userId).eq(transType != null, WalletTransaction::getTransType, transType).orderByDesc(WalletTransaction::getCreatedAt));
@@ -155,7 +216,7 @@ public class FinanceService {
         IPage<WalletTransaction> page = transactionMapper.selectPage(new Page<>(pageNum, pageSize), Wrappers.<WalletTransaction>lambdaQuery()
                 .eq(WalletTransaction::getUserId, userId)
                 .eq(transType != null, WalletTransaction::getTransType, transType)
-                .notIn(WalletTransaction::getTransType, LOAN_TRANS_TYPES)
+                .notIn(WalletTransaction::getTransType, LEDGER_ONLY_TRANS_TYPES)
                 .orderByDesc(WalletTransaction::getCreatedAt));
         return new PageResult<>(page.getTotal(), pageNum, pageSize, page.getRecords().stream().map(this::transactionView).toList());
     }

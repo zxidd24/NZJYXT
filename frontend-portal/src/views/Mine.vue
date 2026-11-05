@@ -33,10 +33,7 @@ async function logout() {
         ><template #title
           ><van-badge :dot="unreadCount > 0"><span>消息中心</span></van-badge></template
         ></van-cell
-      ><van-cell title="我的订单" to="/orders" is-link /><van-cell
-        title="我的钱包"
-        to="/wallet"
-        is-link /><van-cell title="发票信息" to="/invoice" is-link /><van-cell title="我的贷款" to="/loan" is-link /><van-cell
+      ><van-cell title="我的订单" to="/orders" is-link /><van-cell title="发票信息" to="/invoice" is-link /><van-cell title="我的贷款" to="/loan" is-link /><van-cell
         title="认证状态"
         :value="
           profile
