@@ -11,16 +11,27 @@ const voucherUploading = ref(false); const settlement = ref(null);
 async function load(status = null) { try { const data = await request.get("/api/portal/order/page", { params: status == null ? {} : { status } }); rows.value = data.list; } catch (e) { showToast(e.message || "订单加载失败"); } }
 function onTabChange(name) { load(name === "all" ? null : name); }
 function openReceiptUpload(row) { receiptOrder.value = row; receiptFiles.value = []; showReceiptUpload.value = true; }
-async function uploadReceipt(item) {
+// 盖章回传单：同样改为选图后点「确认提交」再上传，避免选错无法撤回。
+async function submitReceipt() {
+  const item = receiptFiles.value?.[0];
   if (!receiptOrder.value || receiptUploading.value) return;
-  receiptUploading.value = true; item.status = "uploading"; item.message = "上传中";
+  if (!item || !item.file) {
+    showToast("请先选择盖章回传单图片");
+    return;
+  }
+  receiptUploading.value = true;
   const body = new FormData(); body.append("file", item.file);
   try {
     const data = await request.post("/api/portal/upload", body);
-    await request.post(`/api/portal/order/${receiptOrder.value.id}/receipt`, { fileUrl: data.url, fileName: item.file?.name || data.filename });
-    item.status = "done"; showToast("盖章回传单已上传"); showReceiptUpload.value = false; await load();
-  } catch (e) { item.status = "failed"; item.message = "上传失败"; showToast(e.message || "回传单上传失败"); }
-  finally { receiptUploading.value = false; }
+    await request.post(`/api/portal/order/${receiptOrder.value.id}/receipt`, {
+      fileUrl: data.url, fileName: item.file?.name || data.filename,
+    });
+    showToast("盖章回传单已上传");
+    showReceiptUpload.value = false;
+    await load();
+  } catch (e) {
+    showToast(e.message || "回传单上传失败");
+  } finally { receiptUploading.value = false; }
 }
 // 打开上传凭证弹窗：同时拉取平台收款账户，方便买家比对后再上传。
 async function openVoucher(row) {
@@ -30,22 +41,28 @@ async function openVoucher(row) {
     settlement.value = await request.get("/api/portal/order/settlement-account");
   } catch (e) { showToast(e.message || "收款账户加载失败"); }
 }
-// 上传转账凭证：后端据此把订单转待审核并创建审核任务，钱到账由后台审核确认。
-async function uploadVoucher(item) {
+// 上传转账凭证：选图后仅预览，用户点「确认提交」才真正上传，
+// 避免"刚选完文件就提交、想换图已经晚了"的问题。
+async function submitVoucher() {
+  const item = voucherFiles.value?.[0];
   if (!voucherOrder.value || voucherUploading.value) return;
-  voucherUploading.value = true; item.status = "uploading"; item.message = "上传中";
+  if (!item || !item.file) {
+    showToast("请先选择转账凭证图片");
+    return;
+  }
+  voucherUploading.value = true;
   const body = new FormData(); body.append("file", item.file);
   try {
     const data = await request.post("/api/portal/upload", body);
     await request.post(`/api/portal/order/${voucherOrder.value.id}/transfer-voucher`, {
       fileUrl: data.url, fileName: item.file?.name || data.filename,
     });
-    item.status = "done";
     showToast("凭证已提交，等待平台核对到账");
     showVoucher.value = false;
     await load();
-  } catch (e) { item.status = "failed"; item.message = "上传失败"; showToast(e.message || "凭证上传失败"); }
-  finally { voucherUploading.value = false; }
+  } catch (e) {
+    showToast(e.message || "凭证上传失败");
+  } finally { voucherUploading.value = false; }
 }
 async function cancel(row) {
   try {
@@ -70,7 +87,7 @@ async function comment(row) { const product = row.details?.[0]; if (!product) re
 onMounted(() => load());
 </script>
 <template>
-  <section><van-nav-bar title="我的订单" left-arrow @click-left="$router.back()" /><van-tabs v-model:active="activeTab" @change="onTabChange" ><van-tab title="全部" name="all"/><van-tab v-for="tab in tabs" :key="tab.status" :title="tab.label" :name="tab.status" /></van-tabs><van-empty v-if="!rows.length" description="暂无订单" /><van-cell-group v-else inset><van-cell v-for="row in rows" :key="row.id" :title="row.orderNo" :label="row.details.map(d => `${d.productName} × ${d.quantity}`).join('、')"><template #value><span class="product-price">¥{{ row.payAmount }}</span><br />{{ statusNames[row.orderStatus] }}</template><template #extra><van-button v-if="row.orderStatus === 0" size="small" type="primary" @click="openVoucher(row)">上传转账凭证</van-button><van-button v-if="row.orderStatus === 0" size="small" plain @click="cancel(row)">取消订单</van-button><van-button v-if="row.orderStatus !== 0" size="small" @click="rebuy(row)">再次下单</van-button><van-button v-if="row.orderStatus === 3" size="small" type="primary" plain @click="openReceiptUpload(row)">上传盖章回传单</van-button><van-button v-if="[1,2,3].includes(row.orderStatus)" size="small" type="danger" plain @click="refund(row)">退款</van-button><van-button v-if="row.orderStatus === 4" size="small" type="primary" plain @click="comment(row)">评价</van-button></template></van-cell></van-cell-group><van-popup v-model:show="showVoucher" position="bottom" round closeable class="pay-popup"><div class="pay-panel"><h3>上传转账凭证</h3><p class="pay-tip">订单号：{{ voucherOrder?.orderNo }}</p><p class="pay-tip">应付金额：<span class="product-price">¥{{ voucherOrder?.payAmount }}</span></p><van-cell-group v-if="settlement" inset class="settlement"><van-cell title="收款人" :value="settlement.payeeName || '-'" /><van-cell title="开户行" :value="settlement.bankName || '-'" /><van-cell title="账号" :value="settlement.accountNo || '-'" /><van-cell title="转账附言" :value="voucherOrder?.orderNo || '-'" /></van-cell-group><p class="pay-tip">请先通过银行转账把货款汇到上述账户（附言填订单号），再上传转账回单或截图。</p><span class="receipt-upload-tip">支持 JPG、PNG、WEBP，大小不超过 10MB</span><van-uploader v-model="voucherFiles" :max-count="1" accept="image/jpeg,image/png,image/webp" :disabled="voucherUploading" :after-read="uploadVoucher" /><van-loading v-if="voucherUploading" size="24px">上传中</van-loading></div></van-popup><van-popup v-model:show="showReceiptUpload" position="bottom" round closeable class="receipt-upload-popup"><div class="receipt-upload"><h3>上传盖章回传单</h3><p>订单：{{ receiptOrder?.orderNo }}</p><span class="receipt-upload-tip">请上传盖章后的回传单图片，支持 JPG、PNG、WEBP，大小不超过 10MB</span><van-uploader v-model="receiptFiles" :max-count="1" accept="image/jpeg,image/png,image/webp" :disabled="receiptUploading" :after-read="uploadReceipt" /><van-loading v-if="receiptUploading" size="24px">上传中</van-loading></div></van-popup></section>
+  <section><van-nav-bar title="我的订单" left-arrow @click-left="$router.back()" /><van-tabs v-model:active="activeTab" @change="onTabChange" ><van-tab title="全部" name="all"/><van-tab v-for="tab in tabs" :key="tab.status" :title="tab.label" :name="tab.status" /></van-tabs><van-empty v-if="!rows.length" description="暂无订单" /><van-cell-group v-else inset><van-cell v-for="row in rows" :key="row.id" :title="row.orderNo" :label="row.details.map(d => `${d.productName} × ${d.quantity}`).join('、')"><template #value><span class="product-price">¥{{ row.payAmount }}</span><br />{{ statusNames[row.orderStatus] }}</template><template #extra><van-button v-if="row.orderStatus === 0" size="small" type="primary" @click="openVoucher(row)">上传转账凭证</van-button><van-button v-if="row.orderStatus === 0" size="small" plain @click="cancel(row)">取消订单</van-button><van-button v-if="row.orderStatus !== 0" size="small" @click="rebuy(row)">再次下单</van-button><van-button v-if="row.orderStatus === 3" size="small" type="primary" plain @click="openReceiptUpload(row)">上传盖章回传单</van-button><van-button v-if="[1,2,3].includes(row.orderStatus)" size="small" type="danger" plain @click="refund(row)">退款</van-button><van-button v-if="row.orderStatus === 4" size="small" type="primary" plain @click="comment(row)">评价</van-button></template></van-cell></van-cell-group><van-popup v-model:show="showVoucher" position="bottom" round closeable class="pay-popup"><div class="pay-panel"><h3>上传转账凭证</h3><p class="pay-tip">订单号：{{ voucherOrder?.orderNo }}</p><p class="pay-tip">应付金额：<span class="product-price">¥{{ voucherOrder?.payAmount }}</span></p><van-cell-group v-if="settlement" inset class="settlement"><van-cell title="收款人" :value="settlement.payeeName || '-'" /><van-cell title="开户行" :value="settlement.bankName || '-'" /><van-cell title="账号" :value="settlement.accountNo || '-'" /><van-cell title="转账附言" :value="voucherOrder?.orderNo || '-'" /></van-cell-group><p class="pay-tip">请先通过银行转账把货款汇到上述账户（附言填订单号），再上传转账回单或截图。</p><span class="receipt-upload-tip">支持 JPG、PNG、WEBP，大小不超过 10MB；选好图片后点下方「确认提交」才会上传。</span><van-uploader v-model="voucherFiles" :max-count="1" accept="image/jpeg,image/png,image/webp" :disabled="voucherUploading" /><van-button block type="primary" :loading="voucherUploading" :disabled="!voucherFiles.length" class="pay-button" @click="submitVoucher">{{ voucherUploading ? '提交中...' : '确认提交' }}</van-button></div></van-popup><van-popup v-model:show="showReceiptUpload" position="bottom" round closeable class="receipt-upload-popup"><div class="receipt-upload"><h3>上传盖章回传单</h3><p>订单：{{ receiptOrder?.orderNo }}</p><span class="receipt-upload-tip">请上传盖章后的回传单图片，支持 JPG、PNG、WEBP，大小不超过 10MB；选好图片后点下方「确认提交」才会上传。</span><van-uploader v-model="receiptFiles" :max-count="1" accept="image/jpeg,image/png,image/webp" :disabled="receiptUploading" /><van-button block type="primary" :loading="receiptUploading" :disabled="!receiptFiles.length" class="pay-button" @click="submitReceipt">{{ receiptUploading ? '提交中...' : '确认提交' }}</van-button></div></van-popup></section>
 </template>
 <style scoped>
 .receipt-upload { padding: 20px 16px 28px; }
