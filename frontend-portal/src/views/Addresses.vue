@@ -125,9 +125,16 @@ onMounted(load);
         :key="row.id"
         :title="row.receiverName"
         :label="row.detailAddress"
-        is-link
-        @click="setDefault(row.id)"
         ><template #value
+          ><van-button
+            v-if="row.isDefault !== 1"
+            size="small"
+            plain
+            type="primary"
+            class="addr-action"
+            @click.stop="setDefault(row.id)"
+            >设为默认</van-button
+          ><van-tag v-else type="primary" class="addr-action">默认</van-tag
           ><van-button
             size="small"
             plain

@@ -47,9 +47,13 @@ public class AddressService {
         address.setCity(input.getCity());
         address.setDistrict(input.getDistrict());
         address.setDetailAddress(input.getDetailAddress());
+        // 显式处理两种取值：设为默认要独占，取消默认要真正落库为 0。
+        // 旧实现只在 isDefault=1 时赋值，传 0 时字段不更新，用户无法取消默认地址。
         if (Integer.valueOf(1).equals(input.getIsDefault())) {
             clearDefault(userId);
             address.setIsDefault(1);
+        } else {
+            address.setIsDefault(0);
         }
         addressMapper.updateById(address);
     }
