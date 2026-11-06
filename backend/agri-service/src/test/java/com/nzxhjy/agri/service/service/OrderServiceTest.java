@@ -739,6 +739,47 @@ class OrderServiceTest {
         verify(auditRecordMapper, never()).insert(any(AuditRecord.class));
     }
 
+    /** 确认完成要求已上传客户盖章回传单；缺失时必须拒绝，前端据此禁用按钮。 */
+    @Test
+    void confirmRejectsWhenCustomerReceiptMissing() {
+        when(orderMapper.selectById(51L)).thenReturn(order(51L, 7L,
+                StatusEnums.OrderStatus.PENDING_RECEIPT.value, StatusEnums.PayStatus.PAID.value));
+        when(attachmentMapper.selectCount(any())).thenReturn(0L);
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> service.confirm(1L, 51L));
+
+        assertEquals("请先上传客户盖章回传单", exception.getMessage());
+        verify(orderMapper, never()).updateById(any(OrderMain.class));
+    }
+
+    /** 已上传回传单时确认完成成功。 */
+    @Test
+    void confirmSucceedsWhenCustomerReceiptExists() {
+        OrderMain order = order(52L, 7L, StatusEnums.OrderStatus.PENDING_RECEIPT.value,
+                StatusEnums.PayStatus.PAID.value);
+        when(orderMapper.selectById(52L)).thenReturn(order);
+        when(attachmentMapper.selectCount(any())).thenReturn(1L);
+
+        service.confirm(1L, 52L);
+
+        assertEquals(StatusEnums.OrderStatus.COMPLETED.value, order.getOrderStatus());
+        verify(orderMapper).updateById(order);
+    }
+
+    /** 非待收货状态不可确认完成。 */
+    @Test
+    void confirmRejectsOrderNotInPendingReceipt() {
+        when(orderMapper.selectById(53L)).thenReturn(order(53L, 7L,
+                StatusEnums.OrderStatus.PENDING_SHIPMENT.value, StatusEnums.PayStatus.PAID.value));
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> service.confirm(1L, 53L));
+
+        assertEquals("当前订单不可确认", exception.getMessage());
+        verifyNoInteractions(attachmentMapper);
+    }
+
     private OrderMain prepareRejection(Long nodeId, String method) {
         TableInfoHelper.initTableInfo(new MapperBuilderAssistant(new MybatisConfiguration(), ""), AuditRecord.class);
         AuditRecord record = new AuditRecord();
