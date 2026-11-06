@@ -228,6 +228,39 @@ class ProductAuditServiceTest {
         assertNull(captor.getValue().getBizSnapshot());
     }
 
+    /** 单独调整展示位置：只改 sort，不动推荐状态。 */
+    @Test
+    void updateSortChangesOnlySortValue() {
+        Product product = product(20L, StatusEnums.ProductStatus.ON_SALE.value);
+        product.setIsRecommend(1);
+        product.setSort(0);
+        when(productMapper.selectById(20L)).thenReturn(product);
+
+        service.updateSort(20L, 99);
+
+        assertEquals(99, product.getSort());
+        // 推荐状态必须保持不变。
+        assertEquals(1, product.getIsRecommend());
+        verify(productMapper).updateById(product);
+    }
+
+    /** 排序值不能为负。 */
+    @Test
+    void updateSortRejectsNegativeValue() {
+        BusinessException exception = assertThrows(BusinessException.class, () -> service.updateSort(21L, -1));
+
+        assertEquals(ErrorCodeEnum.INVALID_PARAM.getCode(), exception.getCode());
+        verifyNoInteractions(productMapper);
+    }
+
+    /** 排序值不能为空。 */
+    @Test
+    void updateSortRejectsNullValue() {
+        assertThrows(BusinessException.class, () -> service.updateSort(22L, null));
+
+        verifyNoInteractions(productMapper);
+    }
+
     private ProductService.ProductCommand command() {
         return new ProductService.ProductCommand(1L, "复合肥", null, null, new BigDecimal("10.00"), 100, "袋", null, null);
     }

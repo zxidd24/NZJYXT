@@ -120,7 +120,16 @@ cd frontend-portal && npm run dev  # 3001
 
 ## 数据库
 
-`database/init.sql` 使用 `CREATE DATABASE IF NOT EXISTS` 和 `CREATE TABLE IF NOT EXISTS`，可重复执行。后台初始化账号为 `admin`，初始密码为 `123456`，首次登录后应立即修改。
+`database/init.sql` 使用 `CREATE DATABASE IF NOT EXISTS` 和 `CREATE TABLE IF NOT EXISTS`，可重复执行，**不会删除或清空业务数据**（已实测连跑两次数据零变化）。后台初始化账号为 `admin`，初始密码为 `123456`，首次登录后应立即修改。
+
+建库或升级表结构时手动执行：
+
+```bash
+MYSQL_PWD="$DB_PASSWORD" mysql -h"$DB_HOST" -P"$DB_PORT" -u"$DB_USER" < database/init.sql
+```
+
+> 说明：`local-deploy.sh` 不会自动执行该脚本。早前版本曾加入「检测到数据库配置就询问建库」，
+> 容易在误按回车时触发，现已移除。
 
 门户认证图片默认保存在 `UPLOAD_PATH` 指定目录，开发环境默认为 `./uploads`。生产环境应使用持久化绝对路径，并将前端 `VITE_API_BASE_URL`、后台 `VITE_PORTAL_BASE_URL` 配置为实际服务地址。
 
@@ -195,11 +204,14 @@ export AGRI_AES_KEY='本地AES密钥'
 执行打包和启动：
 
 ```bash
-./scripts/local-deploy.sh   # Maven 打包两个后端、构建两个前端 dist
+./scripts/local-deploy.sh   # 只做构建：Maven 打包两个后端、构建两个前端 dist（不碰数据库）
 ./scripts/start-local.sh    # API: 8080/8081，静态页: 3000/3001
 ./scripts/smoke-test.sh
 ./scripts/stop-local.sh
 ```
+
+> `local-deploy.sh` **只负责构建，不会执行任何数据库操作**，可以放心反复运行，数据不受影响。
+> 建库或升级表结构请手动执行一次 `database/init.sql`（见下文「数据库」）。
 
 运行日志和 PID 保存在 `.local/`（已加入 `.gitignore`）。当前本地部署入口：
 

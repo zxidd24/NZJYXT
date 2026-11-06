@@ -262,6 +262,22 @@ public class ProductService {
         productMapper.updateById(product);
     }
 
+    /**
+     * 单独调整商品展示位置（排序值），不影响推荐状态。
+     *
+     * <p>门户列表按「推荐 → sort 升序 → 创建时间」排序，sort 越小越靠前。
+     * 与 recommend 拆开是为了避免"只想调顺序，却被迫改推荐状态"。</p>
+     */
+    @Transactional
+    public void updateSort(Long id, Integer sort) {
+        if (sort == null || sort < 0) {
+            throw new BusinessException(ErrorCodeEnum.INVALID_PARAM.getCode(), "排序值不能为空且不能小于0");
+        }
+        Product product = requireProduct(id);
+        product.setSort(sort);
+        productMapper.updateById(product);
+    }
+
     public Product requireProduct(Long id) {
         Product product = productMapper.selectById(id);
         if (product == null) throw new BusinessException(ErrorCodeEnum.BUSINESS_ERROR.getCode(), "商品不存在");

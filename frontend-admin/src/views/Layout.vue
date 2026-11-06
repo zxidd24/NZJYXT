@@ -12,13 +12,30 @@ const info = ref(null);
 const loading = ref(true);
 const { pendingCount, startPolling: startTaskPolling, stopPolling: stopTaskPolling } = useTaskBadge();
 const { pendingOrderCount, startPolling: startOrderPolling, stopPolling: stopOrderPolling } = useOrderBadge();
+// 消息中心未读数：与待办角标一起轮询，避免额外定时器。
+const messageCount = ref(0);
+let messageTimer = null;
+async function fetchMessageCount() {
+  try {
+    const count = await request.get("/api/admin/message/unread-count");
+    messageCount.value = Number(count || 0);
+  } catch (_) { /* 静默失败，不影响页面交互 */ }
+}
+function startMessagePolling(interval = 30000) {
+  stopMessagePolling();
+  fetchMessageCount();
+  messageTimer = setInterval(fetchMessageCount, interval);
+}
+function stopMessagePolling() {
+  if (messageTimer) { clearInterval(messageTimer); messageTimer = null; }
+}
 const passwordDialog = reactive({
   visible: false,
   oldPassword: "",
   newPassword: "",
 });
 const routeMap = {
-  "admin:home": [{ path: "/dashboard", label: "首页看板" }],
+  "admin:home": [{ path: "/dashboard", label: "首页看板" }, { path: "/messages", label: "消息中心" }],
   "admin:task": [{ path: "/tasks", label: "任务管理" }],
   "admin:product": [{ path: "/products", label: "商品管理" }],
   "admin:order": [{ path: "/orders", label: "订单管理" }],
@@ -51,11 +68,13 @@ onMounted(async () => {
   startTaskPolling(30000);
   // 启动待处理订单数量轮询
   startOrderPolling(30000);
+  startMessagePolling(30000);
 });
 
 onUnmounted(() => {
   stopTaskPolling();
   stopOrderPolling();
+  stopMessagePolling();
 });
 
 async function logout() {
@@ -93,10 +112,10 @@ async function changePassword() {
           :index="menu.path"
         >
           <el-badge
-            v-if="menu.path === '/tasks' || menu.path === '/orders'"
-            :value="menu.path === '/tasks' ? pendingCount : pendingOrderCount"
+            v-if="menu.path === '/tasks' || menu.path === '/orders' || menu.path === '/messages'"
+            :value="menu.path === '/tasks' ? pendingCount : (menu.path === '/messages' ? messageCount : pendingOrderCount)"
             :max="99"
-            :hidden="(menu.path === '/tasks' ? pendingCount : pendingOrderCount) === 0"
+            :hidden="(menu.path === '/tasks' ? pendingCount : (menu.path === '/messages' ? messageCount : pendingOrderCount)) === 0"
             class="menu-badge"
           >
             <span class="menu-label">{{ menu.label }}</span>

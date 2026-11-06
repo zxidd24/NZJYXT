@@ -2,7 +2,11 @@ package com.nzxhjy.agri.common.exception;
 
 import com.nzxhjy.agri.common.enums.ErrorCodeEnum;
 import com.nzxhjy.agri.common.model.Result;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 import jakarta.validation.ConstraintViolationException;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -31,6 +35,19 @@ public class GlobalExceptionHandler {
                 .map(violation -> violation.getMessage())
                 .orElse(ErrorCodeEnum.INVALID_PARAM.getMessage());
         return Result.failure(ErrorCodeEnum.INVALID_PARAM.getCode(), message);
+    }
+
+    /** 路径不存在/方法不支持属于客户端错误，不能笼统报"系统异常"，否则排查时误以为是服务端故障。 */
+    @ExceptionHandler(NoResourceFoundException.class)
+    public ResponseEntity<Result<Void>> handleNotFound(NoResourceFoundException exception) {
+        return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                .body(Result.failure(ErrorCodeEnum.INVALID_PARAM.getCode(), "接口不存在"));
+    }
+
+    @ExceptionHandler(HttpRequestMethodNotSupportedException.class)
+    public ResponseEntity<Result<Void>> handleMethodNotSupported(HttpRequestMethodNotSupportedException exception) {
+        return ResponseEntity.status(HttpStatus.METHOD_NOT_ALLOWED)
+                .body(Result.failure(ErrorCodeEnum.INVALID_PARAM.getCode(), "请求方法不支持"));
     }
 
     @ExceptionHandler(Exception.class)

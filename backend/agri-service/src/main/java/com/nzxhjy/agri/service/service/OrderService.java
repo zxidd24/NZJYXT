@@ -20,9 +20,6 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
-import java.io.ByteArrayOutputStream;
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -289,7 +286,6 @@ public class OrderService {
         a.setUploadedBy(userId);
         attachmentMapper.insert(a);
     }
-    public byte[] voucher(Long userId, Long orderId) { OrderView v = detail(orderId, userId); if (v.orderStatus < 1 || v.payStatus != 1) throw business("支付并审核通过后才能下载凭证"); String text = "AGRI TRADING VOUCHER\nOrder: " + v.orderNo + "\nAmount: " + v.payAmount + "\nReceiver: " + v.receiverName + " " + v.receiverAddress; return simplePdf(text); }
 
     public PageResult<OrderView> adminPage(int pageNum, int pageSize, Integer status, String orderNo, Long categoryId) {
         IPage<OrderMain> page = orderMapper.selectAdminPage(new Page<>(pageNum, pageSize), status,
@@ -496,50 +492,6 @@ public class OrderService {
     private BusinessException business(String message) { return new BusinessException(ErrorCodeEnum.BUSINESS_ERROR.getCode(), message); }
     private String generateNo(String prefix) { return prefix + LocalDateTime.now().format(NO_FORMAT) + String.format("%04d", new Random().nextInt(10000)); }
     private String orderTokenKey(String token) { return "agri:order:token:" + token; }
-
-    private byte[] simplePdf(String text) {
-        String[] lines = text.split("\\n", -1);
-        StringBuilder content = new StringBuilder("BT /F1 12 Tf 50 780 Td ");
-        for (int i = 0; i < lines.length; i++) {
-            if (i > 0) content.append("0 -16 Td ");
-            content.append('<').append(toPdfUnicodeHex(lines[i])).append("> Tj ");
-        }
-        content.append("ET");
-        byte[] contentBytes = content.toString().getBytes(StandardCharsets.US_ASCII);
-        String[] objects = {
-                "<</Type/Catalog/Pages 2 0 R>>",
-                "<</Type/Pages/Count 1/Kids[3 0 R]>>",
-                "<</Type/Page/Parent 2 0 R/MediaBox[0 0 595 842]/Resources<</Font<</F1 4 0 R>>>>/Contents 5 0 R>>",
-                "<</Type/Font/Subtype/Type0/BaseFont/STSong-Light/Encoding/UniGB-UCS2-H/DescendantFonts[6 0 R]>>",
-                "<</Length " + contentBytes.length + ">>stream\n" + new String(contentBytes, StandardCharsets.US_ASCII) + "\nendstream",
-                "<</Type/Font/Subtype/CIDFontType0/BaseFont/STSong-Light/CIDSystemInfo<</Registry(Adobe)/Ordering(GB1)/Supplement 5>>/DW 1000>>"
-        };
-        try {
-            ByteArrayOutputStream out = new ByteArrayOutputStream();
-            out.write("%PDF-1.4\n".getBytes(StandardCharsets.US_ASCII));
-            int[] offsets = new int[objects.length + 1];
-            for (int i = 0; i < objects.length; i++) {
-                offsets[i + 1] = out.size();
-                out.write((i + 1 + " 0 obj\n" + objects[i] + "\nendobj\n").getBytes(StandardCharsets.US_ASCII));
-            }
-            int xrefOffset = out.size();
-            out.write(("xref\n0 " + (objects.length + 1) + "\n0000000000 65535 f \n").getBytes(StandardCharsets.US_ASCII));
-            for (int i = 1; i < offsets.length; i++) {
-                out.write(String.format(Locale.ROOT, "%010d 00000 n \n", offsets[i]).getBytes(StandardCharsets.US_ASCII));
-            }
-            out.write(("trailer\n<</Size " + (objects.length + 1) + "/Root 1 0 R>>\nstartxref\n" + xrefOffset + "\n%%EOF\n").getBytes(StandardCharsets.US_ASCII));
-            return out.toByteArray();
-        } catch (IOException exception) {
-            throw new IllegalStateException("电子凭证生成失败", exception);
-        }
-    }
-
-    private String toPdfUnicodeHex(String value) {
-        byte[] bytes = value.getBytes(StandardCharsets.UTF_16BE);
-        StringBuilder hex = new StringBuilder("FEFF");
-        for (byte b : bytes) hex.append(String.format(Locale.ROOT, "%02X", b & 0xff));
-        return hex.toString();
-    }
 
     public record ItemCommand(Long productId, Integer quantity) {}
     @Data @AllArgsConstructor public static class CartView { private Long productId; private String productName; private BigDecimal price; private Integer quantity; private Integer selected; private Integer stock; private String images; }

@@ -67,6 +67,9 @@ class FinanceServiceTest {
         TableInfoHelper.initTableInfo(
                 new MapperBuilderAssistant(new MybatisConfiguration(), ""),
                 com.nzxhjy.agri.service.entity.AuditRecord.class);
+        TableInfoHelper.initTableInfo(
+                new MapperBuilderAssistant(new MybatisConfiguration(), ""),
+                com.nzxhjy.agri.service.entity.InvoiceInfo.class);
     }
 
     @Test
@@ -453,6 +456,97 @@ feature/zzx_1104
 
         verify(productMapper, never()).update(any(), any());
         verifyNoInteractions(transactionMapper);
+    }
+
+    /** 编辑发票抬头时不传 isDefault，必须保留原默认标记，不能被清成 0。 */
+    @Test
+    void editingInvoiceInfoKeepsDefaultFlag() {
+        com.nzxhjy.agri.service.entity.InvoiceInfo existing = new com.nzxhjy.agri.service.entity.InvoiceInfo();
+        existing.setId(70L);
+        existing.setUserId(7L);
+        existing.setTitle("旧抬头");
+        existing.setIsDefault(1);
+        existing.setDeleted(0);
+        when(invoiceInfoMapper.selectById(70L)).thenReturn(existing);
+
+        service.saveInvoiceInfo(7L, 70L, 2, "新抬头", null, null, null, null, null, null);
+
+        ArgumentCaptor<com.nzxhjy.agri.service.entity.InvoiceInfo> captor =
+                ArgumentCaptor.forClass(com.nzxhjy.agri.service.entity.InvoiceInfo.class);
+        verify(invoiceInfoMapper).updateById(captor.capture());
+        assertEquals(1, captor.getValue().getIsDefault(), "编辑时不应丢失默认标记");
+        assertEquals("新抬头", captor.getValue().getTitle());
+    }
+
+    /** 显式传 0 可以取消默认。 */
+    @Test
+    void editingInvoiceInfoCanClearDefaultExplicitly() {
+        com.nzxhjy.agri.service.entity.InvoiceInfo existing = new com.nzxhjy.agri.service.entity.InvoiceInfo();
+        existing.setId(71L);
+        existing.setUserId(7L);
+        existing.setTitle("抬头");
+        existing.setIsDefault(1);
+        existing.setDeleted(0);
+        when(invoiceInfoMapper.selectById(71L)).thenReturn(existing);
+
+        service.saveInvoiceInfo(7L, 71L, 2, "抬头", null, null, null, null, null, 0);
+
+        ArgumentCaptor<com.nzxhjy.agri.service.entity.InvoiceInfo> captor =
+                ArgumentCaptor.forClass(com.nzxhjy.agri.service.entity.InvoiceInfo.class);
+        verify(invoiceInfoMapper).updateById(captor.capture());
+        assertEquals(0, captor.getValue().getIsDefault());
+    }
+
+    /** 账户明细要带业务订单号，不能只给前端一个内部 ID（如 98）。 */
+    @Test
+    void transactionsExposeOrderNo() {
+        com.nzxhjy.agri.service.entity.WalletTransaction tx = new com.nzxhjy.agri.service.entity.WalletTransaction();
+        tx.setId(1L);
+        tx.setTransNo("LT1");
+        tx.setOrderId(98L);
+        tx.setAmount(new BigDecimal("1.00"));
+        tx.setDirection(1);
+        tx.setTransType(7);
+        tx.setTransStatus(1);
+        tx.setBalanceAfter(BigDecimal.ZERO);
+        com.baomidou.mybatisplus.extension.plugins.pagination.Page<com.nzxhjy.agri.service.entity.WalletTransaction> page =
+                new com.baomidou.mybatisplus.extension.plugins.pagination.Page<>(1, 10);
+        page.setRecords(List.of(tx));
+        page.setTotal(1);
+        when(transactionMapper.selectPage(any(), any())).thenReturn(page);
+        OrderMain order = new OrderMain();
+        order.setId(98L);
+        order.setOrderNo("O202611061117181876000");
+        when(orderMapper.selectBatchIds(any())).thenReturn(List.of(order));
+
+        FinanceService.TransactionView view = service.transactions(null, 1, 10, null).getList().get(0);
+
+        assertEquals("O202611061117181876000", view.getOrderNo());
+        assertEquals(98L, view.getOrderId());
+    }
+
+    /** 批量查询订单号，避免逐条查库造成 N+1。 */
+    @Test
+    void transactionsQueryOrdersInOneBatch() {
+        com.nzxhjy.agri.service.entity.WalletTransaction a = new com.nzxhjy.agri.service.entity.WalletTransaction();
+        a.setId(1L); a.setOrderId(10L); a.setAmount(BigDecimal.ONE); a.setDirection(1); a.setTransType(7); a.setTransStatus(1);
+        com.nzxhjy.agri.service.entity.WalletTransaction b = new com.nzxhjy.agri.service.entity.WalletTransaction();
+        b.setId(2L); b.setOrderId(11L); b.setAmount(BigDecimal.ONE); b.setDirection(1); b.setTransType(7); b.setTransStatus(1);
+        com.baomidou.mybatisplus.extension.plugins.pagination.Page<com.nzxhjy.agri.service.entity.WalletTransaction> page =
+                new com.baomidou.mybatisplus.extension.plugins.pagination.Page<>(1, 10);
+        page.setRecords(List.of(a, b));
+        page.setTotal(2);
+        when(transactionMapper.selectPage(any(), any())).thenReturn(page);
+        OrderMain o1 = new OrderMain(); o1.setId(10L); o1.setOrderNo("O10");
+        OrderMain o2 = new OrderMain(); o2.setId(11L); o2.setOrderNo("O11");
+        when(orderMapper.selectBatchIds(any())).thenReturn(List.of(o1, o2));
+
+        var list = service.transactions(null, 1, 10, null).getList();
+
+        assertEquals("O10", list.get(0).getOrderNo());
+        assertEquals("O11", list.get(1).getOrderNo());
+        // 只查一次订单表，而不是每条流水查一次。
+        verify(orderMapper, times(1)).selectBatchIds(any());
     }
 
     private RefundApply pendingRefund(Long id) {

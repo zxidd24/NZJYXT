@@ -86,6 +86,13 @@ public class ProductController {
         return Result.success();
     }
 
+    /** 单独调整展示位置（排序值），不影响推荐状态。 */
+    @PutMapping("/{id}/sort")
+    public Result<Void> sort(@PathVariable Long id, @Valid @RequestBody SortRequest request) {
+        productService.updateSort(id, request.getSort());
+        return Result.success();
+    }
+
     @Data
     public static class ProductRequest {
         @NotNull(message = "商品分类不能为空")
@@ -128,6 +135,13 @@ public class ProductController {
     public static class ShelfRequest {
         @NotNull(message = "上下架状态不能为空")
         private Integer status;
+    }
+
+    @Data
+    public static class SortRequest {
+        @NotNull(message = "排序值不能为空")
+        @Min(value = 0, message = "排序值不能小于0")
+        private Integer sort;
     }
 
     @Data
