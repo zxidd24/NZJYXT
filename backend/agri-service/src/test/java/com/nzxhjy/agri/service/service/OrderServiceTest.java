@@ -37,9 +37,6 @@ import org.springframework.transaction.annotation.AnnotationTransactionAttribute
 import org.springframework.transaction.interceptor.TransactionInterceptor;
 
 import java.math.BigDecimal;
-import java.lang.reflect.Method;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
 
@@ -265,20 +262,6 @@ class OrderServiceTest {
         assertThrows(BusinessException.class, () -> service.pay(7L, order.getOrderNo(), "WALLET"));
 
         verifyNoInteractions(walletMapper, transactionMapper);
-    }
-
-    @Test
-    void voucherPdfContainsXrefAndUnicodeText() throws Exception {
-        Method method = OrderService.class.getDeclaredMethod("simplePdf", String.class);
-        method.setAccessible(true);
-        byte[] pdf = (byte[]) method.invoke(service, "收货人：张三\n订单号：O-1");
-        String raw = new String(pdf, java.nio.charset.StandardCharsets.US_ASCII);
-
-        assertEquals(true, raw.startsWith("%PDF-1.4"));
-        assertEquals(true, raw.contains("/BaseFont/STSong-Light"));
-        assertEquals(true, raw.contains("xref\n"));
-        assertEquals(true, raw.contains("startxref\n"));
-        Files.write(Path.of("target/order-voucher-test.pdf"), pdf);
     }
 
     @Test

@@ -208,7 +208,7 @@ public class FinanceService {
 
     public PageResult<TransactionView> transactions(Long userId, int pageNum, int pageSize, Integer transType) {
         IPage<WalletTransaction> page = transactionMapper.selectPage(new Page<>(pageNum, pageSize), Wrappers.<WalletTransaction>lambdaQuery().eq(userId != null, WalletTransaction::getUserId, userId).eq(transType != null, WalletTransaction::getTransType, transType).orderByDesc(WalletTransaction::getCreatedAt));
-        return new PageResult<>(page.getTotal(), pageNum, pageSize, page.getRecords().stream().map(this::transactionView).toList());
+        return new PageResult<>(page.getTotal(), pageNum, pageSize, transactionViews(page.getRecords()));
     }
 
     /** 门户钱包流水：排除贷款记账流水，避免用户看到"放款扣款"却余额没变。 */
@@ -218,7 +218,7 @@ public class FinanceService {
                 .eq(transType != null, WalletTransaction::getTransType, transType)
                 .notIn(WalletTransaction::getTransType, LEDGER_ONLY_TRANS_TYPES)
                 .orderByDesc(WalletTransaction::getCreatedAt));
-        return new PageResult<>(page.getTotal(), pageNum, pageSize, page.getRecords().stream().map(this::transactionView).toList());
+        return new PageResult<>(page.getTotal(), pageNum, pageSize, transactionViews(page.getRecords()));
     }
 
     @Transactional
@@ -235,7 +235,13 @@ public class FinanceService {
         InvoiceInfo info = id == null ? new InvoiceInfo() : invoiceInfoMapper.selectById(id);
         if (id != null && (info == null || !Objects.equals(info.getUserId(), userId) || Objects.equals(info.getDeleted(), 1))) throw business("发票信息不存在");
         if (id == null) info.setUserId(userId);
-        info.setTitleType(titleType == null ? 2 : titleType); info.setTitle(trim(title, 100)); info.setTaxNo(trim(taxNo, 50)); info.setBankName(trim(bankName, 50)); info.setBankAccount(bankAccount == null || bankAccount.isBlank() ? info.getBankAccount() : aesUtils.encrypt(bankAccount)); info.setRegAddress(trim(regAddress, 200)); info.setPhone(trim(phone, 20)); info.setIsDefault(Integer.valueOf(1).equals(isDefault) ? 1 : 0); info.setDeleted(0);
+        info.setTitleType(titleType == null ? 2 : titleType); info.setTitle(trim(title, 100)); info.setTaxNo(trim(taxNo, 50)); info.setBankName(trim(bankName, 50)); info.setBankAccount(bankAccount == null || bankAccount.isBlank() ? info.getBankAccount() : aesUtils.encrypt(bankAccount)); info.setRegAddress(trim(regAddress, 200)); info.setPhone(trim(phone, 20)); // 编辑时不传 isDefault 应保持原值，否则改个抬头就会把默认标记清掉。
+        if (id == null) {
+            info.setIsDefault(Integer.valueOf(1).equals(isDefault) ? 1 : 0);
+        } else if (isDefault != null) {
+            info.setIsDefault(Integer.valueOf(1).equals(isDefault) ? 1 : 0);
+        }
+        info.setDeleted(0);
         if (info.getIsDefault() == 1) invoiceInfoMapper.update(null, Wrappers.<InvoiceInfo>lambdaUpdate().eq(InvoiceInfo::getUserId, userId).set(InvoiceInfo::getIsDefault, 0));
         if (id == null) invoiceInfoMapper.insert(info); else invoiceInfoMapper.updateById(info);
         return invoiceInfoView(info);
@@ -350,7 +356,7 @@ public class FinanceService {
 
     public PageResult<TransactionView> accountDetail(int pageNum, int pageSize, Integer transType) { return transactions(null, pageNum, pageSize, transType); }
     public List<IncomeExpense> incomeExpense(String period, LocalDate date) { var query = Wrappers.<WalletTransaction>query().eq("trans_status", 1); if (date != null) query.ge("created_at", date.atStartOfDay()).lt("created_at", date.plusDays(1).atStartOfDay()); List<WalletTransaction> rows = transactionMapper.selectList(query); Map<String, BigDecimal[]> groups = new TreeMap<>(); for (WalletTransaction tx : rows) { if (tx.getCreatedAt() == null) continue; String key = "month".equalsIgnoreCase(period) ? tx.getCreatedAt().toLocalDate().withDayOfMonth(1).toString() : tx.getCreatedAt().toLocalDate().toString(); BigDecimal[] sum = groups.computeIfAbsent(key, k -> new BigDecimal[]{BigDecimal.ZERO, BigDecimal.ZERO}); if (tx.getDirection() != null && tx.getDirection() == 1) sum[0] = sum[0].add(defaultAmount(tx.getAmount())); else sum[1] = sum[1].add(defaultAmount(tx.getAmount())); } return groups.entrySet().stream().map(e -> new IncomeExpense(e.getKey(), e.getValue()[0], e.getValue()[1], e.getValue()[0].subtract(e.getValue()[1]))).toList(); }
-    public byte[] statementExport(Integer transType) { List<TransactionView> rows = accountDetail(1, 10000, transType).getList(); try (ByteArrayOutputStream out = new ByteArrayOutputStream()) { EasyExcel.write(out, StatementRow.class).sheet("对账凭据").doWrite(rows.stream().map(r -> new StatementRow(r.getTransNo(), r.getOrderId(), r.getAmount(), r.getDirection(), r.getTransType(), r.getBalanceAfter(), r.getCreatedAt())).toList()); return out.toByteArray(); } catch (Exception e) { throw new BusinessException(ErrorCodeEnum.SYSTEM_ERROR.getCode(), "对账凭据导出失败"); } }
+    public byte[] statementExport(Integer transType) { List<TransactionView> rows = accountDetail(1, 10000, transType).getList(); try (ByteArrayOutputStream out = new ByteArrayOutputStream()) { EasyExcel.write(out, StatementRow.class).sheet("对账凭据").doWrite(rows.stream().map(r -> new StatementRow(r.getTransNo(), r.getOrderNo(), r.getAmount(), r.getDirection(), r.getTransType(), r.getBalanceAfter(), r.getCreatedAt())).toList()); return out.toByteArray(); } catch (Exception e) { throw new BusinessException(ErrorCodeEnum.SYSTEM_ERROR.getCode(), "对账凭据导出失败"); } }
     @Transactional public void attachVoucher(Long id, String voucherUrl) { WalletTransaction tx = transactionMapper.selectById(id); if (tx == null) throw business("资金流水不存在"); tx.setVoucherUrl(trim(voucherUrl, 255)); transactionMapper.updateById(tx); }
 
     private void createAudit(int bizType, Long bizId, String bizNo, String summary, Long applicantId) { AuditFlow flow = auditFlowMapper.selectOne(Wrappers.<AuditFlow>lambdaQuery().eq(AuditFlow::getBizType, bizType).eq(AuditFlow::getEnabled, 1)); AuditNode node = flow == null ? null : auditNodeMapper.selectOne(Wrappers.<AuditNode>lambdaQuery().eq(AuditNode::getFlowId, flow.getId()).orderByAsc(AuditNode::getNodeOrder).last("LIMIT 1")); if (node == null) throw business("审核流程未配置"); AuditRecord record = new AuditRecord(); record.setBizType(bizType); record.setBizId(bizId); record.setBizNo(bizNo); record.setBizSummary(summary); record.setFlowNodeId(node.getId()); record.setNodeName(node.getNodeName()); record.setStatus(0); record.setApplicantId(applicantId); record.setApplyTime(LocalDateTime.now()); auditRecordMapper.insert(record); messageService.sendTodo(node.getId(), bizType, bizId); }
@@ -368,7 +374,27 @@ public class FinanceService {
     private RefundView refundView(RefundApply r) { String productName = detailMapper.selectList(Wrappers.<OrderDetail>lambdaQuery().eq(OrderDetail::getOrderId, r.getOrderId())).stream().map(OrderDetail::getProductName).filter(Objects::nonNull).findFirst().orElse(""); return new RefundView(r.getId(), r.getRefundNo(), r.getOrderId(), productName, r.getOrderAmount(), r.getRefundAmount(), r.getReason(), r.getStatus(), r.getRefundChannel(), r.getApplyTime(), r.getAuditTime(), r.getRemark()); }
     private CommentView commentView(OrderComment c) { Product p = productMapper.selectById(c.getProductId()); SysUser u = c.getUserId() == null ? null : userMapper.selectById(c.getUserId()); return new CommentView(c.getId(), c.getOrderId(), c.getProductId(), p == null ? null : p.getName(), c.getUserId(), u == null ? null : u.getRealName(), c.getScore(), c.getContent(), c.getImages(), c.getCreatedAt()); }
     private WalletView walletView(WalletAccount a) { return new WalletView(a.getUserId(), defaultAmount(a.getBalance()), defaultAmount(a.getFrozenAmount())); }
-    private TransactionView transactionView(WalletTransaction t) { return new TransactionView(t.getId(), t.getTransNo(), t.getOrderId(), t.getAmount(), t.getDirection(), t.getTransType(), t.getTransStatus(), t.getBalanceAfter(), t.getRemark(), t.getVoucherUrl(), t.getCreatedAt()); }
+    /**
+     * 批量组装流水视图：一次性查出关联订单号，避免逐条查询造成 N+1。
+     *
+     * <p>此前只返回 orderId（数据库主键），前端只能显示 98 这类内部 ID，
+     * 财务看不懂也无法据此检索订单，因此补上业务订单号 orderNo。</p>
+     */
+    private List<TransactionView> transactionViews(List<WalletTransaction> records) {
+        if (records == null || records.isEmpty()) return List.of();
+        List<Long> orderIds = records.stream().map(WalletTransaction::getOrderId)
+                .filter(Objects::nonNull).distinct().toList();
+        Map<Long, String> orderNos = orderIds.isEmpty() ? Map.of()
+                : orderMapper.selectBatchIds(orderIds).stream()
+                .filter(o -> o.getOrderNo() != null)
+                .collect(java.util.stream.Collectors.toMap(OrderMain::getId, OrderMain::getOrderNo));
+        return records.stream().map(t -> new TransactionView(t.getId(), t.getTransNo(), t.getOrderId(),
+                t.getOrderId() == null ? null : orderNos.get(t.getOrderId()),
+                t.getAmount(), t.getDirection(), t.getTransType(), t.getTransStatus(), t.getBalanceAfter(),
+                t.getRemark(), t.getVoucherUrl(), t.getCreatedAt())).toList();
+    }
+
+    private TransactionView transactionView(WalletTransaction t) { return transactionViews(List.of(t)).get(0); }
     private InvoiceInfoView invoiceInfoView(InvoiceInfo i) { String account = i.getBankAccount() == null ? null : aesUtils.decrypt(i.getBankAccount()); return new InvoiceInfoView(i.getId(), i.getTitleType(), i.getTitle(), i.getTaxNo(), i.getBankName(), account == null ? null : MaskUtils.bankCard(account), i.getRegAddress(), i.getPhone(), i.getIsDefault()); }
     private InvoiceApplyView invoiceApplyView(InvoiceApply i) { return new InvoiceApplyView(i.getId(), i.getApplyNo(), i.getOrderId(), i.getInvoiceInfoId(), i.getAmount(), i.getStatus(), i.getApplyTime(), i.getIssueTime(), i.getInvoiceNo(), i.getRemark()); }
     private LoanRecordView loanView(LoanRecord l) { return new LoanRecordView(l.getId(), l.getLoanNo(), l.getAmount(), l.getCreditLimitUsed(), l.getStatus(), l.getApplyTime(), l.getAuditTime(), l.getReleaseTime(), l.getRepayTime(), l.getAuditRemark()); }
@@ -381,11 +407,26 @@ public class FinanceService {
     @Data @AllArgsConstructor public static class RefundView { private Long id; private String refundNo; private Long orderId; private String productName; private BigDecimal orderAmount; private BigDecimal refundAmount; private String reason; private Integer status; private String refundChannel; private LocalDateTime applyTime; private LocalDateTime auditTime; private String remark; }
     @Data @AllArgsConstructor public static class CommentView { private Long id; private Long orderId; private Long productId; private String productName; private Long userId; private String buyerName; private Integer score; private String content; private String images; private LocalDateTime createdAt; }
     @Data @AllArgsConstructor public static class WalletView { private Long userId; private BigDecimal balance; private BigDecimal frozenAmount; }
-    @Data @AllArgsConstructor public static class TransactionView { private Long id; private String transNo; private Long orderId; private BigDecimal amount; private Integer direction; private Integer transType; private Integer transStatus; private BigDecimal balanceAfter; private String remark; private String voucherUrl; private LocalDateTime createdAt; }
+    @Data @AllArgsConstructor public static class TransactionView { private Long id; private String transNo; private Long orderId; private String orderNo; private BigDecimal amount; private Integer direction; private Integer transType; private Integer transStatus; private BigDecimal balanceAfter; private String remark; private String voucherUrl; private LocalDateTime createdAt; }
     @Data @AllArgsConstructor public static class InvoiceInfoView { private Long id; private Integer titleType; private String title; private String taxNo; private String bankName; private String bankAccount; private String regAddress; private String phone; private Integer isDefault; }
     @Data @AllArgsConstructor public static class InvoiceApplyView { private Long id; private String applyNo; private Long orderId; private Long invoiceInfoId; private BigDecimal amount; private Integer status; private LocalDateTime applyTime; private LocalDateTime issueTime; private String invoiceNo; private String remark; }
     @Data @AllArgsConstructor public static class LoanRecordView { private Long id; private String loanNo; private BigDecimal amount; private BigDecimal creditLimitUsed; private Integer status; private LocalDateTime applyTime; private LocalDateTime auditTime; private LocalDateTime releaseTime; private LocalDateTime repayTime; private String auditRemark; }
     @Data @AllArgsConstructor public static class LoanInfo { private BigDecimal creditLimit; private BigDecimal used; private BigDecimal remaining; private List<LoanRecordView> records; }
     @Data @AllArgsConstructor public static class IncomeExpense { private String period; private BigDecimal income; private BigDecimal expense; private BigDecimal net; }
-    @Data @AllArgsConstructor public static class StatementRow { private String transNo; private Long orderId; private BigDecimal amount; private Integer direction; private Integer transType; private BigDecimal balanceAfter; private LocalDateTime createdAt; }
+    @Data @AllArgsConstructor public static class StatementRow {
+        @com.alibaba.excel.annotation.ExcelProperty("流水号")
+        private String transNo;
+        @com.alibaba.excel.annotation.ExcelProperty("订单号")
+        private String orderNo;
+        @com.alibaba.excel.annotation.ExcelProperty("金额")
+        private BigDecimal amount;
+        @com.alibaba.excel.annotation.ExcelProperty("方向")
+        private Integer direction;
+        @com.alibaba.excel.annotation.ExcelProperty("类型")
+        private Integer transType;
+        @com.alibaba.excel.annotation.ExcelProperty("交易后余额")
+        private BigDecimal balanceAfter;
+        @com.alibaba.excel.annotation.ExcelProperty("时间")
+        private LocalDateTime createdAt;
+    }
 }

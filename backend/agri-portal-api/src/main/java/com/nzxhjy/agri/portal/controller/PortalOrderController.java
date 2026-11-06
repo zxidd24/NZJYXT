@@ -11,10 +11,6 @@ import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
 import lombok.Data;
 import lombok.RequiredArgsConstructor;
-import org.springframework.core.io.ByteArrayResource;
-import org.springframework.http.HttpHeaders;
-import org.springframework.http.MediaType;
-import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
@@ -38,7 +34,6 @@ public class PortalOrderController {
     @PostMapping("/{id}/receipt") public Result<Void> receipt(@PathVariable Long id, @Valid @RequestBody AttachmentRequest r) { orderService.addAttachment(UserContext.getUserId(), id, 1, r.fileUrl, r.fileName); return Result.success(); }
     /** 上传转账凭证并发起订单审核；此步不置已支付，到账由后台审核确认。 */
     @PostMapping("/{id}/transfer-voucher") public Result<OrderService.PayResult> transferVoucher(@PathVariable Long id, @Valid @RequestBody AttachmentRequest r) { return Result.success(orderService.uploadTransferVoucher(UserContext.getUserId(), id, r.fileUrl, r.fileName)); }
-    @GetMapping("/{id}/voucher") public ResponseEntity<ByteArrayResource> voucher(@PathVariable Long id) { byte[] bytes = orderService.voucher(UserContext.getUserId(), id); return ResponseEntity.ok().header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=order-voucher-" + id + ".pdf").contentType(MediaType.APPLICATION_PDF).contentLength(bytes.length).body(new ByteArrayResource(bytes)); }
     @Data public static class CreateRequest { @NotBlank private String token; @NotNull private Long addressId; @NotNull @Size(min=1) private List<OrderService.ItemCommand> items; @Size(max=255) private String buyerNote; }
     @Data public static class PayRequest { @NotBlank private String orderNo; @NotBlank private String payMethod; }
     @Data public static class CancelRequest { @NotBlank private String orderNo; }

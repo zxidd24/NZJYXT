@@ -64,6 +64,27 @@ async function submitVoucher() {
     showToast(e.message || "凭证上传失败");
   } finally { voucherUploading.value = false; }
 }
+// 物流信息：后端把「物流公司 单号」拼在 sellerNote 里。
+function logistics(row) {
+  const note = row.sellerNote;
+  if (!note) return "";
+  const parts = note.split(" ");
+  if (parts.length < 2) return note;
+  const trackingNo = parts.pop();
+  return `${parts.join(" ")} · 单号 ${trackingNo}`;
+}
+// 发货单附件（类型 2）：平台发货时上传的签章单。
+function deliveryFiles(row) {
+  return (row.attachments || []).filter((item) => item.type === 2);
+}
+// 查看发货单：直接在新窗口打开平台上传的签章发货单图片。
+const apiBase = import.meta.env.VITE_API_BASE_URL || "http://localhost:8081";
+function viewDelivery(row) {
+  const files = deliveryFiles(row);
+  if (!files.length) return showToast("暂无发货单");
+  const url = files[0].fileUrl;
+  window.open(url?.startsWith("http") ? url : `${apiBase}${url}`, "_blank");
+}
 async function cancel(row) {
   try {
     await showConfirmDialog({ title: "取消订单", message: `确认取消订单 ${row.orderNo}？` });
@@ -87,7 +108,7 @@ async function comment(row) { const product = row.details?.[0]; if (!product) re
 onMounted(() => load());
 </script>
 <template>
-  <section><van-nav-bar title="我的订单" left-arrow @click-left="$router.back()" /><van-tabs v-model:active="activeTab" @change="onTabChange" ><van-tab title="全部" name="all"/><van-tab v-for="tab in tabs" :key="tab.status" :title="tab.label" :name="tab.status" /></van-tabs><van-empty v-if="!rows.length" description="暂无订单" /><van-cell-group v-else inset><van-cell v-for="row in rows" :key="row.id" :title="row.orderNo" :label="row.details.map(d => `${d.productName} × ${d.quantity}`).join('、')"><template #value><span class="product-price">¥{{ row.payAmount }}</span><br />{{ statusNames[row.orderStatus] }}</template><template #extra><van-button v-if="row.orderStatus === 0" size="small" type="primary" @click="openVoucher(row)">上传转账凭证</van-button><van-button v-if="row.orderStatus === 0" size="small" plain @click="cancel(row)">取消订单</van-button><van-button v-if="row.orderStatus !== 0" size="small" @click="rebuy(row)">再次下单</van-button><van-button v-if="row.orderStatus === 3" size="small" type="primary" plain @click="openReceiptUpload(row)">上传盖章回传单</van-button><van-button v-if="[1,2,3].includes(row.orderStatus)" size="small" type="danger" plain @click="refund(row)">退款</van-button><van-button v-if="row.orderStatus === 4" size="small" type="primary" plain @click="comment(row)">评价</van-button></template></van-cell></van-cell-group><van-popup v-model:show="showVoucher" position="bottom" round closeable class="pay-popup"><div class="pay-panel"><h3>上传转账凭证</h3><p class="pay-tip">订单号：{{ voucherOrder?.orderNo }}</p><p class="pay-tip">应付金额：<span class="product-price">¥{{ voucherOrder?.payAmount }}</span></p><van-cell-group v-if="settlement" inset class="settlement"><van-cell title="收款人" :value="settlement.payeeName || '-'" /><van-cell title="开户行" :value="settlement.bankName || '-'" /><van-cell title="账号" :value="settlement.accountNo || '-'" /><van-cell title="转账附言" :value="voucherOrder?.orderNo || '-'" /></van-cell-group><p class="pay-tip">请先通过银行转账把货款汇到上述账户（附言填订单号），再上传转账回单或截图。</p><span class="receipt-upload-tip">支持 JPG、PNG、WEBP，大小不超过 10MB；选好图片后点下方「确认提交」才会上传。</span><van-uploader v-model="voucherFiles" :max-count="1" accept="image/jpeg,image/png,image/webp" :disabled="voucherUploading" /><van-button block type="primary" :loading="voucherUploading" :disabled="!voucherFiles.length" class="pay-button" @click="submitVoucher">{{ voucherUploading ? '提交中...' : '确认提交' }}</van-button></div></van-popup><van-popup v-model:show="showReceiptUpload" position="bottom" round closeable class="receipt-upload-popup"><div class="receipt-upload"><h3>上传盖章回传单</h3><p>订单：{{ receiptOrder?.orderNo }}</p><span class="receipt-upload-tip">请上传盖章后的回传单图片，支持 JPG、PNG、WEBP，大小不超过 10MB；选好图片后点下方「确认提交」才会上传。</span><van-uploader v-model="receiptFiles" :max-count="1" accept="image/jpeg,image/png,image/webp" :disabled="receiptUploading" /><van-button block type="primary" :loading="receiptUploading" :disabled="!receiptFiles.length" class="pay-button" @click="submitReceipt">{{ receiptUploading ? '提交中...' : '确认提交' }}</van-button></div></van-popup></section>
+  <section><van-nav-bar title="我的订单" left-arrow @click-left="$router.back()" /><van-tabs v-model:active="activeTab" @change="onTabChange" ><van-tab title="全部" name="all"/><van-tab v-for="tab in tabs" :key="tab.status" :title="tab.label" :name="tab.status" /></van-tabs><van-empty v-if="!rows.length" description="暂无订单" /><van-cell-group v-else inset><van-cell v-for="row in rows" :key="row.id" :title="row.orderNo"><template #label><div class="order-label">{{ row.details.map(d => `${d.productName} × ${d.quantity}`).join('、') }}<div v-if="logistics(row)" class="logistics">物流：{{ logistics(row) }}</div></div></template><template #value><span class="product-price">¥{{ row.payAmount }}</span><br />{{ statusNames[row.orderStatus] }}</template><template #extra><van-button v-if="row.orderStatus === 0" size="small" type="primary" @click="openVoucher(row)">上传转账凭证</van-button><van-button v-if="row.orderStatus === 0" size="small" plain @click="cancel(row)">取消订单</van-button><van-button v-if="row.orderStatus !== 0" size="small" @click="rebuy(row)">再次下单</van-button><van-button v-if="row.orderStatus === 3" size="small" type="primary" plain @click="openReceiptUpload(row)">上传盖章回传单</van-button><van-button v-if="[1,2,3].includes(row.orderStatus)" size="small" type="danger" plain @click="refund(row)">退款</van-button><van-button v-if="row.orderStatus === 4" size="small" type="primary" plain @click="comment(row)">评价</van-button><van-button v-if="deliveryFiles(row).length" size="small" plain type="primary" @click="viewDelivery(row)">查看发货单</van-button></template></van-cell></van-cell-group><van-popup v-model:show="showVoucher" position="bottom" round closeable class="pay-popup"><div class="pay-panel"><h3>上传转账凭证</h3><p class="pay-tip">订单号：{{ voucherOrder?.orderNo }}</p><p class="pay-tip">应付金额：<span class="product-price">¥{{ voucherOrder?.payAmount }}</span></p><van-cell-group v-if="settlement" inset class="settlement"><van-cell title="收款人" :value="settlement.payeeName || '-'" /><van-cell title="开户行" :value="settlement.bankName || '-'" /><van-cell title="账号" :value="settlement.accountNo || '-'" /><van-cell title="转账附言" :value="voucherOrder?.orderNo || '-'" /></van-cell-group><p class="pay-tip">请先通过银行转账把货款汇到上述账户（附言填订单号），再上传转账回单或截图。</p><span class="receipt-upload-tip">支持 JPG、PNG、WEBP，大小不超过 10MB；选好图片后点下方「确认提交」才会上传。</span><van-uploader v-model="voucherFiles" :max-count="1" accept="image/jpeg,image/png,image/webp" :disabled="voucherUploading" /><van-button block type="primary" :loading="voucherUploading" :disabled="!voucherFiles.length" class="pay-button" @click="submitVoucher">{{ voucherUploading ? '提交中...' : '确认提交' }}</van-button></div></van-popup><van-popup v-model:show="showReceiptUpload" position="bottom" round closeable class="receipt-upload-popup"><div class="receipt-upload"><h3>上传盖章回传单</h3><p>订单：{{ receiptOrder?.orderNo }}</p><span class="receipt-upload-tip">请上传盖章后的回传单图片，支持 JPG、PNG、WEBP，大小不超过 10MB；选好图片后点下方「确认提交」才会上传。</span><van-uploader v-model="receiptFiles" :max-count="1" accept="image/jpeg,image/png,image/webp" :disabled="receiptUploading" /><van-button block type="primary" :loading="receiptUploading" :disabled="!receiptFiles.length" class="pay-button" @click="submitReceipt">{{ receiptUploading ? '提交中...' : '确认提交' }}</van-button></div></van-popup></section>
 </template>
 <style scoped>
 .receipt-upload { padding: 20px 16px 28px; }
@@ -101,4 +122,6 @@ onMounted(() => load());
 .settlement { margin-top: 12px; }
 .pay-button { margin-top: 20px; }
 .pay-panel .receipt-upload-tip { display: block; margin: 12px 0 8px; color: #969799; font-size: 13px; }
+.order-label { line-height: 1.5; }
+.logistics { color: #1989fa; font-size: 12px; margin-top: 4px; }
 </style>

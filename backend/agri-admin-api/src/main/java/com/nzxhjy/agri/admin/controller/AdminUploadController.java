@@ -29,7 +29,6 @@ import java.util.UUID;
 
 @RestController
 @RequestMapping("/api/admin")
-@RequirePermission("admin:product")
 @RequiredArgsConstructor
 @Validated
 public class AdminUploadController {
@@ -40,8 +39,26 @@ public class AdminUploadController {
     @Value("${agri.upload.path:./uploads}")
     private String uploadPath;
 
+    /** 商品图片上传（商品管理权限）。 */
     @PostMapping("/upload")
+    @RequirePermission("admin:product")
     public Result<Map<String, String>> upload(@RequestPart("file") @NotNull MultipartFile file) {
+        return Result.success(store(file));
+    }
+
+    /**
+     * 订单相关图片上传（订单管理权限）：签章发货单等。
+     *
+     * <p>单独开口而不是复用 /upload，是因为后者要求 admin:product，
+     * 而销售员只有 admin:order，直接复用会被 403 拒绝。</p>
+     */
+    @PostMapping("/order-upload")
+    @RequirePermission("admin:order")
+    public Result<Map<String, String>> orderUpload(@RequestPart("file") @NotNull MultipartFile file) {
+        return Result.success(store(file));
+    }
+
+    private Map<String, String> store(MultipartFile file) {
         if (file.isEmpty() || file.getSize() > MAX_FILE_SIZE) {
             throw new BusinessException(ErrorCodeEnum.INVALID_PARAM.getCode(), "文件不能为空且大小不能超过5MB");
         }
@@ -63,7 +80,7 @@ public class AdminUploadController {
                 throw new BusinessException(ErrorCodeEnum.INVALID_PARAM.getCode(), "非法文件名");
             }
             Files.copy(file.getInputStream(), target, StandardCopyOption.REPLACE_EXISTING);
-            return Result.success(Map.of("url", "/uploads/" + filename, "filename", filename));
+            return Map.of("url", "/uploads/" + filename, "filename", filename);
         } catch (IOException exception) {
             throw new BusinessException(ErrorCodeEnum.SYSTEM_ERROR.getCode(), "文件上传失败");
         }

@@ -529,12 +529,9 @@ INSERT INTO `audit_flow` (`id`,`biz_type`,`flow_name`) VALUES
   (4,4,'订单审核'),(5,5,'退款审核'),(6,6,'贷款审核')
 ON DUPLICATE KEY UPDATE `flow_name`=VALUES(`flow_name`), `enabled`=1;
 
--- 订单审核已改为一级：销售(role 3)或主管(role 2)任一人都可审核。
--- audit_node 没有唯一键，ON DUPLICATE KEY 不会生效，故用"仅当该流程无节点时插入"保证幂等，
--- 并单独删除历史上种子写入的两级订单节点，避免升级后仍然两级审批。
-DELETE FROM `audit_node`
-WHERE `flow_id` = 4 AND `node_name` IN ('销售审核', '主管审核');
-
+-- 订单审核为一级流程（销售或主管任一人都可审核）。
+-- audit_node 没有唯一键，ON DUPLICATE KEY 不会生效，故用"仅当该流程无节点时才插入"保证幂等：
+-- 已存在节点（含运维在页面上调整过的）一律不动，避免每次执行都把流程重置。
 INSERT INTO `audit_node` (`flow_id`,`node_name`,`role_id`,`node_order`)
 SELECT 1,'认证审核',2,1 FROM DUAL
 WHERE NOT EXISTS (SELECT 1 FROM `audit_node` WHERE `flow_id`=1);
